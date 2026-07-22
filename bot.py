@@ -54,6 +54,19 @@ def run_bot():
 
 
 
+@bot.message_handler(commands=['start_server'])
+def handle_server_start(message):
+    start_server()
+
+def start_server(seconds=0):
+    time.sleep(seconds)
+    pass
+
+
+@bot.message_handler(commands=['start_server_in'])
+def handle_server_start_in(message):
+    start_server(int(message.text[:15]))
+
 
 
 if __name__ == "__main__":
