@@ -1,12 +1,11 @@
 import os
 import sys
 import telebot
-from telebot import types
 from telebot import apihelper
 import time
 import logging
-import re
 import requests
+from python_aternos import Client
 
 apihelper.CONNECT_TIMEOUT = 40
 apihelper.READ_TIMEOUT = 40
@@ -29,6 +28,27 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+ATERNOS_USERNAME = os.environ.get("ATERNOS_USERNAME", "") #getting username
+if not ATERNOS_USERNAME:
+    sys.exit(1)
+
+ATERNOS_PASSWORD = os.environ.get("ATERNOS_PASSWORD", "") #getting password
+if not ATERNOS_PASSWORD:
+    sys.exit(1)
+
+def get_server():
+    client = Client()
+    # Логинимся на Aternos[reference:6][reference:7]
+    client.login(ATERNOS_USERNAME, ATERNOS_PASSWORD)
+    servers = client.list_servers()
+    # Получаем нужный сервер
+    for server in servers:
+        if server.address == "WWCraft-48Fh.aternos.me:54111":
+            return server
+
+server = get_server()
 
 
 logger.info("=" * 50)
@@ -56,16 +76,26 @@ def run_bot():
 
 @bot.message_handler(commands=['start_server'])
 def handle_server_start(message):
-    start_server()
+    server.start()
 
-def start_server(seconds=0):
-    time.sleep(seconds)
-    pass
+    bot.reply_to(message, 'Сервер запускается...')
+
+@bot.message_handler(commands=['stop_server'])
+def handle_server_stop(message):
+    server.stop()
+
+    bot.reply_to(message, 'Сервер останавливается...')
+
+@bot.message_handler(commands=['status'])
+def send_server_status(message):
+    server.fetch()
+
+    bot.reply_to(message, f'Статус сервера: {server.status}')
 
 
 @bot.message_handler(commands=['start_server_in'])
 def handle_server_start_in(message):
-    start_server(int(message.text[:15]))
+    pass
 
 
 
