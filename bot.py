@@ -44,11 +44,10 @@ def get_server():
     client.login(ATERNOS_USERNAME, ATERNOS_PASSWORD)
     servers = client.list_servers()
     # Получаем нужный сервер
-    for server in servers:
-        if server.address == "WWCraft-48Fh.aternos.me:54111":
-            return server
-
-server = get_server()
+    # for server in servers:
+    #     if server.address == "WWCraft-48Fh.aternos.me:54111":
+    #         return server
+    return servers[0]
 
 
 logger.info("=" * 50)
@@ -76,18 +75,21 @@ def run_bot():
 
 @bot.message_handler(commands=['start_server'])
 def handle_server_start(message):
+    server = get_server()
     server.start()
 
     bot.reply_to(message, 'Сервер запускается...')
 
 @bot.message_handler(commands=['stop_server'])
 def handle_server_stop(message):
+    server = get_server()
     server.stop()
 
     bot.reply_to(message, 'Сервер останавливается...')
 
 @bot.message_handler(commands=['status'])
 def send_server_status(message):
+    server = get_server()
     server.fetch()
 
     bot.reply_to(message, f'Статус сервера: {server.status}')
