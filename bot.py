@@ -39,7 +39,7 @@ if not ATERNOS_PASSWORD:
     sys.exit(1)
 
 def get_server():
-    client = Client()
+    client = Client(use_cloudscraper=True)
     # Логинимся на Aternos[reference:6][reference:7]
     client.login(ATERNOS_USERNAME, ATERNOS_PASSWORD)
     servers = client.list()
