@@ -42,7 +42,7 @@ def get_server():
     client = Client()
     # Логинимся на Aternos[reference:6][reference:7]
     client.login(ATERNOS_USERNAME, ATERNOS_PASSWORD)
-    servers = client.list_servers()
+    servers = client.list()
     # Получаем нужный сервер
     # for server in servers:
     #     if server.address == "WWCraft-48Fh.aternos.me:54111":
