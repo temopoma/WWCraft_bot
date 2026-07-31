@@ -2,23 +2,25 @@ import os
 import sys
 import time
 import logging
+import asyncio
+import subprocess
 import requests
 import telebot
 from telebot import apihelper
+from playwright.async_api import async_playwright
 
-# ---------- ИМПОРТ ATERNOS ----------
-from python_aternos import Client
-
-# Пытаемся импортировать CloudflareError
-try:
-    from python_aternos import CloudflareError
-except ImportError:
+# ---------- УСТАНОВКА БРАУЗЕРА (однократно) ----------
+def install_browser():
     try:
-        from python_aternos.aterrors import CloudflareError
-    except ImportError:
-        class CloudflareError(Exception):
-            pass
-# -----------------------------------
+        subprocess.run(["playwright", "install", "chromium", "--with-deps"], check=True, capture_output=True)
+        logging.info("✅ Chromium установлен")
+    except Exception as e:
+        logging.error(f"❌ Ошибка установки Chromium: {e}")
+
+# Для Railway: выполняем установку при старте, если браузер ещё не установлен
+if not os.path.exists("/root/.cache/ms-playwright"):
+    install_browser()
+# ----------------------------------------------------
 
 apihelper.CONNECT_TIMEOUT = 40
 apihelper.READ_TIMEOUT = 40
@@ -32,7 +34,7 @@ ATERNOS_PASSWORD = os.environ.get("ATERNOS_PASSWORD")
 if not ATERNOS_USERNAME or not ATERNOS_PASSWORD:
     sys.exit("❌ ATERNOS_USERNAME или ATERNOS_PASSWORD не заданы")
 
-SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"   # без порта
+SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"  # без порта
 
 # ---------- ЛОГИРОВАНИЕ ----------
 logging.basicConfig(
@@ -47,124 +49,139 @@ logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(TOKEN)
 
-# ---------- ГЛОБАЛЬНЫЙ КЕШ ----------
-_client = None
-_server = None
+# ---------- ГЛОБАЛЬНЫЙ КЕШ ДЛЯ COOKIES ----------
+COOKIE_FILE = "aternos_cookies.json"
 
-def _create_client():
-    """Создаёт клиент, пробуя разные варианты."""
-    # Пробуем с cloudscraper
-    try:
-        return Client(use_cloudscraper=True)
-    except TypeError:
-        # Если не поддерживается, пробуем без параметров
-        return Client()
+async def get_aternos_status():
+    """Запускает браузер, логинится в Aternos и возвращает статус сервера."""
+    async with async_playwright() as p:
+        # Запускаем браузер с минимальными параметрами для экономии памяти
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-setuid-sandbox',
+                '--disable-web-security',
+                '--disable-features=BlockInsecurePrivateNetworkRequests',
+                '--disable-features=OutOfBlinkCors',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-features=block-all-mixed-content',
+                '--disable-web-security',
+                '--disable-features=CrossOriginOpenerPolicy,CrossOriginEmbedderPolicy',
+                '--disable-features=SharedArrayBuffer',
+                '--disable-features=COOP,COEP',
+            ],
+            timeout=30000
+        )
+        context = await browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+        )
+        page = await context.new_page()
 
-def ensure_client():
-    global _client
-    if _client is None:
         try:
-            _client = _create_client()
-            logger.info("🔑 Логинимся в Aternos...")
-            _client.login(ATERNOS_USERNAME, ATERNOS_PASSWORD)
-            logger.info("✅ Успешный вход")
+            # Пробуем загрузить сохранённые cookies
+            if os.path.exists(COOKIE_FILE):
+                import json
+                with open(COOKIE_FILE, 'r') as f:
+                    cookies = json.load(f)
+                await context.add_cookies(cookies)
+                logger.info("🍪 Загружены сохранённые cookies")
+
+            # Переходим на страницу сервера
+            await page.goto(f"https://aternos.org/server/{SERVER_ADDRESS}", timeout=60000)
+            await page.wait_for_timeout(2000)
+
+            # Проверяем, нужен ли логин
+            if "login" in page.url or page.url.startswith("https://aternos.org/login"):
+                logger.info("🔑 Требуется логин")
+                await page.fill('input[name="username"]', ATERNOS_USERNAME)
+                await page.fill('input[name="password"]', ATERNOS_PASSWORD)
+                await page.click('button[type="submit"]')
+                await page.wait_for_timeout(5000)
+
+                # Сохраняем cookies после логина
+                cookies = await context.cookies()
+                import json
+                with open(COOKIE_FILE, 'w') as f:
+                    json.dump(cookies, f, indent=2)
+                logger.info("🍪 Cookies сохранены")
+
+            # Ждём загрузки страницы сервера
+            await page.wait_for_selector('.server-status', timeout=30000)
+
+            # Получаем статус
+            status_element = await page.query_selector('.server-status')
+            if status_element:
+                status_text = await status_element.inner_text()
+                status_text = status_text.strip().lower()
+                if 'online' in status_text:
+                    status = 'online'
+                elif 'offline' in status_text:
+                    status = 'offline'
+                else:
+                    status = status_text
+            else:
+                status = 'неизвестно'
+
+            # Также можно проверить наличие кнопки запуска
+            start_button = await page.query_selector('button[data-action="start"]')
+            if start_button and status == 'offline':
+                # Сервер офлайн, кнопка есть
+                pass
+
+            return status
+
         except Exception as e:
-            logger.error(f"Ошибка при логине: {e}")
+            logger.error(f"Ошибка при получении статуса: {e}")
             raise
-    return _client
+        finally:
+            await browser.close()
+            # Принудительный сбор мусора
+            import gc
+            gc.collect()
 
-def ensure_server():
-    global _server
-    if _server is None:
-        client = ensure_client()
-        # Используем правильный метод для нового форка
-        servers = client.account.list_servers()
-        if not servers:
-            raise RuntimeError("Список серверов пуст")
-        for s in servers:
-            addr = getattr(s, 'address', None) or getattr(s, 'domain', None) or getattr(s, 'subdomain', None)
-            if addr == SERVER_ADDRESS:
-                _server = s
-                break
-        if _server is None:
-            first_addr = getattr(servers[0], 'address', None) or getattr(servers[0], 'domain', 'неизвестно')
-            logger.warning(f"Сервер {SERVER_ADDRESS} не найден, беру первый: {first_addr}")
-            _server = servers[0]
-        logger.info(f"✅ Выбран сервер: {getattr(_server, 'address', getattr(_server, 'domain', 'неизвестно'))}")
-    return _server
-
-def safe_server_call(message, action_func, success_msg, error_msg="❌ Ошибка"):
+# ---------- СИНХРОННАЯ ОБЁРТКА ДЛЯ TELEBOT ----------
+def get_status_sync():
     try:
-        server = ensure_server()
-        action_func(server)
-        bot.reply_to(message, success_msg)
-    except CloudflareError:
-        global _client, _server
-        _client = None
-        _server = None
-        try:
-            server = ensure_server()
-            action_func(server)
-            bot.reply_to(message, success_msg)
-        except Exception as e:
-            logger.error(f"CloudflareError после перелогина: {e}")
-            bot.reply_to(message, "❌ Aternos временно недоступен для ботов (Cloudflare). Попробуйте позже.")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(get_aternos_status())
+        loop.close()
+        return result
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        bot.reply_to(message, f"{error_msg}: {e}")
+        logger.error(f"Ошибка в синхронной обёртке: {e}")
+        return None
 
 # ---------- КОМАНДЫ ----------
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     bot.reply_to(message, "Привет! Я бот для управления сервером Aternos.\n"
-                          "/status – статус\n"
+                          "/status – статус (может занять 20-30 секунд)\n"
                           "/start_server – запуск\n"
                           "/stop_server – остановка")
 
 @bot.message_handler(commands=['status'])
 def cmd_status(message):
-    try:
-        server = ensure_server()
-        if hasattr(server, 'fetch'):
-            server.fetch()
-        status = getattr(server, 'status', None)
-        if status is None:
-            status = getattr(server, 'state', None)
-        if status is None:
-            status = getattr(server, 'online', 'неизвестно')
+    bot.reply_to(message, "⏳ Проверяю статус, подождите... (до 30 секунд)")
+    status = get_status_sync()
+    if status is None:
+        bot.reply_to(message, "❌ Не удалось получить статус (ошибка или таймаут)")
+    else:
         bot.reply_to(message, f"🟢 Статус сервера: {status}")
-    except CloudflareError:
-        global _client, _server
-        _client = None
-        _server = None
-        try:
-            server = ensure_server()
-            if hasattr(server, 'fetch'):
-                server.fetch()
-            status = getattr(server, 'status', getattr(server, 'state', getattr(server, 'online', 'неизвестно')))
-            bot.reply_to(message, f"🟢 Статус сервера: {status}")
-        except Exception as e:
-            bot.reply_to(message, "❌ Ошибка Cloudflare, попробуйте позже.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
 
+# Заглушки для start/stop (позже добавим)
 @bot.message_handler(commands=['start_server'])
 def cmd_start_server(message):
-    safe_server_call(
-        message,
-        lambda s: s.start() if hasattr(s, 'start') else None,
-        "✅ Сервер запускается...",
-        "❌ Не удалось запустить сервер"
-    )
+    bot.reply_to(message, "⏳ Функция запуска в разработке")
 
 @bot.message_handler(commands=['stop_server'])
 def cmd_stop_server(message):
-    safe_server_call(
-        message,
-        lambda s: s.stop() if hasattr(s, 'stop') else None,
-        "✅ Сервер останавливается...",
-        "❌ Не удалось остановить сервер"
-    )
+    bot.reply_to(message, "⏳ Функция остановки в разработке")
 
 # ---------- ЗАПУСК ----------
 def run_bot():
