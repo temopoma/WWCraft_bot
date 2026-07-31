@@ -6,7 +6,7 @@ import requests
 import telebot
 from telebot import apihelper
 
-# ---------- УНИВЕРСАЛЬНЫЙ ИМПОРТ ATERNOS ----------
+# ---------- ИМПОРТ ATERNOS ----------
 from python_aternos import Client
 
 # Пытаемся импортировать CloudflareError
@@ -18,7 +18,7 @@ except ImportError:
     except ImportError:
         class CloudflareError(Exception):
             pass
-# --------------------------------------------------
+# -----------------------------------
 
 apihelper.CONNECT_TIMEOUT = 40
 apihelper.READ_TIMEOUT = 40
@@ -53,30 +53,60 @@ _server = None
 
 def _create_client():
     """Создаёт клиент, пробуя разные варианты параметров."""
-    # Сначала пробуем с use_cloudscraper
-    try:
-        return Client(use_cloudscraper=True)
-    except TypeError:
-        # Если не поддерживается, пробуем без параметров
+    for param in [{'use_cloudscraper': True}, {}]:
         try:
-            return Client()
-        except:
-            # Если и так не работает, просто Client() без аргументов
-            return Client()
+            return Client(**param)
+        except TypeError:
+            continue
+    return Client()  # fallback
 
 def _get_server_list(client):
-    """Получает список серверов, пробуя разные имена методов."""
-    # Пробуем list_servers
-    if hasattr(client, 'list_servers'):
-        return client.list_servers()
-    # Пробуем get_servers
-    if hasattr(client, 'get_servers'):
-        return client.get_servers()
-    # Пробуем servers (атрибут)
-    if hasattr(client, 'servers'):
-        return client.servers
-    # Если ничего нет, выбрасываем ошибку
-    raise AttributeError("Не удалось найти метод для получения списка серверов")
+    """
+    Пытается получить список серверов разными способами.
+    Если ничего не подходит, логирует доступные атрибуты и выбрасывает исключение.
+    """
+    # Список возможных методов/атрибутов для получения серверов
+    candidates = [
+        ('method', 'list_servers'),
+        ('method', 'get_servers'),
+        ('method', 'list'),
+        ('method', 'get_server_list'),
+        ('attr', 'servers'),
+        ('attr', 'server_list'),
+        ('attr', 'account.servers'),   # возможно, через account
+        ('method', 'account.get_servers'),
+        ('method', 'account.list_servers'),
+        ('attr', 'account.server_list'),
+    ]
+
+    for kind, name in candidates:
+        try:
+            if kind == 'method':
+                # Проверяем, есть ли метод
+                if hasattr(client, name) and callable(getattr(client, name)):
+                    result = getattr(client, name)()
+                    if result:
+                        return result
+            else:  # attr
+                # Проверяем, есть ли атрибут, возможно, через точку
+                parts = name.split('.')
+                obj = client
+                for part in parts:
+                    if hasattr(obj, part):
+                        obj = getattr(obj, part)
+                    else:
+                        obj = None
+                        break
+                if obj is not None and isinstance(obj, list) and len(obj) > 0:
+                    return obj
+        except Exception as e:
+            logger.warning(f"Попытка {kind} {name} не удалась: {e}")
+            continue
+
+    # Если ничего не сработало, логируем все атрибуты клиента для отладки
+    attrs = [attr for attr in dir(client) if not attr.startswith('_')]
+    logger.error(f"Доступные атрибуты клиента: {attrs}")
+    raise RuntimeError(f"Не удалось найти способ получения списка серверов. Доступные атрибуты: {attrs}")
 
 def ensure_client():
     global _client
@@ -99,15 +129,17 @@ def ensure_server():
         if not servers:
             raise RuntimeError("Список серверов пуст")
         for s in servers:
-            # Адрес может быть в атрибуте address или domain
-            addr = getattr(s, 'address', None) or getattr(s, 'domain', None)
+            # Адрес может быть в атрибуте address, domain или subdomain
+            addr = getattr(s, 'address', None) or getattr(s, 'domain', None) or getattr(s, 'subdomain', None)
             if addr == SERVER_ADDRESS:
                 _server = s
                 break
         if _server is None:
-            logger.warning(f"Сервер {SERVER_ADDRESS} не найден, беру первый: {getattr(servers[0], 'address', 'unknown')}")
+            # Если не нашли, берём первый и логируем его адрес
+            first_addr = getattr(servers[0], 'address', None) or getattr(servers[0], 'domain', 'неизвестно')
+            logger.warning(f"Сервер {SERVER_ADDRESS} не найден, беру первый: {first_addr}")
             _server = servers[0]
-        logger.info(f"✅ Выбран сервер: {getattr(_server, 'address', getattr(_server, 'domain', 'unknown'))}")
+        logger.info(f"✅ Выбран сервер: {getattr(_server, 'address', getattr(_server, 'domain', 'неизвестно'))}")
     return _server
 
 def safe_server_call(message, action_func, success_msg, error_msg="❌ Ошибка"):
@@ -142,13 +174,15 @@ def cmd_start(message):
 def cmd_status(message):
     try:
         server = ensure_server()
-        # Пробуем fetch() для обновления статуса
+        # Обновляем статус, если есть метод fetch
         if hasattr(server, 'fetch'):
             server.fetch()
-        # Статус может быть в атрибуте status или state
+        # Статус может быть в атрибуте status, state или online
         status = getattr(server, 'status', None)
         if status is None:
-            status = getattr(server, 'state', 'неизвестно')
+            status = getattr(server, 'state', None)
+        if status is None:
+            status = getattr(server, 'online', 'неизвестно')
         bot.reply_to(message, f"🟢 Статус сервера: {status}")
     except CloudflareError:
         global _client, _server
@@ -158,7 +192,7 @@ def cmd_status(message):
             server = ensure_server()
             if hasattr(server, 'fetch'):
                 server.fetch()
-            status = getattr(server, 'status', getattr(server, 'state', 'неизвестно'))
+            status = getattr(server, 'status', getattr(server, 'state', getattr(server, 'online', 'неизвестно')))
             bot.reply_to(message, f"🟢 Статус сервера: {status}")
         except Exception as e:
             bot.reply_to(message, "❌ Ошибка Cloudflare, попробуйте позже.")
