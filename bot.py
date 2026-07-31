@@ -6,19 +6,19 @@ import requests
 import telebot
 from telebot import apihelper
 
-# ---------- УНИВЕРСАЛЬНЫЙ ИМПОРТ ДЛЯ ATERNOS ----------
+# ---------- ИМПОРТ ATERNOS ----------
 from python_aternos import Client
 
+# Пытаемся импортировать CloudflareError из разных мест
 try:
     from python_aternos import CloudflareError
 except ImportError:
     try:
         from python_aternos.aterrors import CloudflareError
     except ImportError:
-        # fallback – определяем свой класс для проверки по тексту
         class CloudflareError(Exception):
             pass
-# ----------------------------------------------------
+# -----------------------------------
 
 apihelper.CONNECT_TIMEOUT = 40
 apihelper.READ_TIMEOUT = 40
@@ -55,15 +55,17 @@ def ensure_client():
     global _client
     if _client is None:
         try:
-            import cloudscraper
-            session = cloudscraper.create_scraper()
-            _client = Client(session=session)
-            logger.info("🔑 Логинимся в Aternos...")
+            # Попытка с поддержкой cloudscraper
+            _client = Client(use_cloudscraper=True)
+            logger.info("🔑 Логинимся в Aternos с use_cloudscraper...")
             _client.login(ATERNOS_USERNAME, ATERNOS_PASSWORD)
             logger.info("✅ Успешный вход")
-        except CloudflareError as e:
-            logger.error(f"CloudflareError: {e}")
-            raise
+        except TypeError:
+            # Если параметр не поддерживается, создаём клиент без параметров
+            logger.warning("use_cloudscraper не поддерживается, пробуем без него")
+            _client = Client()
+            _client.login(ATERNOS_USERNAME, ATERNOS_PASSWORD)
+            logger.info("✅ Успешный вход (без cloudscraper)")
         except Exception as e:
             logger.error(f"Ошибка при логине: {e}")
             raise
@@ -73,7 +75,7 @@ def ensure_server():
     global _server
     if _server is None:
         client = ensure_client()
-        servers = client.list_servers()           # правильный метод
+        servers = client.list_servers()
         if not servers:
             raise RuntimeError("Список серверов пуст")
         for s in servers:
@@ -92,7 +94,6 @@ def safe_server_call(message, action_func, success_msg, error_msg="❌ Ошиб�
         action_func(server)
         bot.reply_to(message, success_msg)
     except CloudflareError:
-        # сброс кеша и повтор
         global _client, _server
         _client = None
         _server = None
