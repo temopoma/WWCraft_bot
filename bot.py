@@ -125,17 +125,16 @@ def ensure_server():
     global _server
     if _server is None:
         client = ensure_client()
-        servers = _get_server_list(client)
+        # Получаем список серверов через объект account
+        servers = client.account.list_servers()
         if not servers:
             raise RuntimeError("Список серверов пуст")
         for s in servers:
-            # Адрес может быть в атрибуте address, domain или subdomain
             addr = getattr(s, 'address', None) or getattr(s, 'domain', None) or getattr(s, 'subdomain', None)
             if addr == SERVER_ADDRESS:
                 _server = s
                 break
         if _server is None:
-            # Если не нашли, берём первый и логируем его адрес
             first_addr = getattr(servers[0], 'address', None) or getattr(servers[0], 'domain', 'неизвестно')
             logger.warning(f"Сервер {SERVER_ADDRESS} не найден, беру первый: {first_addr}")
             _server = servers[0]
