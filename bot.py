@@ -5,9 +5,21 @@ import logging
 import requests
 import telebot
 from telebot import apihelper
-from python_aternos import Client, CloudflareError
 
-# ------------------- НАСТРОЙКИ -------------------
+# ---------- УНИВЕРСАЛЬНЫЙ ИМПОРТ ДЛЯ ATERNOS ----------
+from python_aternos import Client
+
+try:
+    from python_aternos import CloudflareError
+except ImportError:
+    try:
+        from python_aternos.aterrors import CloudflareError
+    except ImportError:
+        # fallback – определяем свой класс для проверки по тексту
+        class CloudflareError(Exception):
+            pass
+# ----------------------------------------------------
+
 apihelper.CONNECT_TIMEOUT = 40
 apihelper.READ_TIMEOUT = 40
 
@@ -20,9 +32,9 @@ ATERNOS_PASSWORD = os.environ.get("ATERNOS_PASSWORD")
 if not ATERNOS_USERNAME or not ATERNOS_PASSWORD:
     sys.exit("❌ ATERNOS_USERNAME или ATERNOS_PASSWORD не заданы")
 
-SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"  # без порта, проверьте
+SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"   # без порта
 
-# ------------------- ЛОГИРОВАНИЕ -------------------
+# ---------- ЛОГИРОВАНИЕ ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -33,19 +45,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ------------------- ИНИЦИАЛИЗАЦИЯ БОТА -------------------
 bot = telebot.TeleBot(TOKEN)
 
-# Глобальные переменные для кеширования
+# ---------- ГЛОБАЛЬНЫЙ КЕШ ----------
 _client = None
 _server = None
 
 def ensure_client():
-    """Создаёт клиент с cloudscraper и логинится, если ещё не сделано."""
     global _client
     if _client is None:
         try:
-            # Пытаемся использовать cloudscraper для обхода Cloudflare
             import cloudscraper
             session = cloudscraper.create_scraper()
             _client = Client(session=session)
@@ -61,33 +70,29 @@ def ensure_client():
     return _client
 
 def ensure_server():
-    """Получает объект сервера и кеширует его."""
     global _server
     if _server is None:
         client = ensure_client()
-        servers = client.list_servers()          # исправлено: list_servers()
+        servers = client.list_servers()           # правильный метод
         if not servers:
             raise RuntimeError("Список серверов пуст")
-        # Ищем сервер по адресу (без порта)
         for s in servers:
             if s.address == SERVER_ADDRESS:
                 _server = s
                 break
         if _server is None:
-            # Если не нашли, берём первый
             logger.warning(f"Сервер {SERVER_ADDRESS} не найден, беру первый: {servers[0].address}")
             _server = servers[0]
         logger.info(f"✅ Выбран сервер: {_server.address}")
     return _server
 
 def safe_server_call(message, action_func, success_msg, error_msg="❌ Ошибка"):
-    """Обёртка для вызова действий с сервером с обработкой ошибок."""
     try:
         server = ensure_server()
         action_func(server)
         bot.reply_to(message, success_msg)
     except CloudflareError:
-        # Если Cloudflare не пропускает, пробуем перелогиниться один раз
+        # сброс кеша и повтор
         global _client, _server
         _client = None
         _server = None
@@ -102,25 +107,21 @@ def safe_server_call(message, action_func, success_msg, error_msg="❌ Ошиб�
         logger.error(f"Ошибка: {e}")
         bot.reply_to(message, f"{error_msg}: {e}")
 
-# ------------------- КОМАНДЫ -------------------
+# ---------- КОМАНДЫ ----------
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     bot.reply_to(message, "Привет! Я бот для управления сервером Aternos.\n"
-                          "/status – статус сервера\n"
+                          "/status – статус\n"
                           "/start_server – запуск\n"
                           "/stop_server – остановка")
 
 @bot.message_handler(commands=['status'])
 def cmd_status(message):
-    def action(server):
-        server.fetch()  # обновляем статус
-        return server.status
     try:
         server = ensure_server()
         server.fetch()
         bot.reply_to(message, f"🟢 Статус сервера: {server.status}")
     except CloudflareError:
-        # повторная попытка
         global _client, _server
         _client = None
         _server = None
@@ -151,7 +152,7 @@ def cmd_stop_server(message):
         "❌ Не удалось остановить сервер"
     )
 
-# ------------------- ЗАПУСК БОТА -------------------
+# ---------- ЗАПУСК ----------
 def run_bot():
     restart_count = 0
     base_wait = 2
