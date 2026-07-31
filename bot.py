@@ -34,7 +34,7 @@ ATERNOS_PASSWORD = os.environ.get("ATERNOS_PASSWORD")
 if not ATERNOS_USERNAME or not ATERNOS_PASSWORD:
     sys.exit("❌ ATERNOS_USERNAME или ATERNOS_PASSWORD не заданы")
 
-SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"  # замените на ваш
+SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"
 
 # ---------- ЛОГИРОВАНИЕ ----------
 logging.basicConfig(
@@ -50,15 +50,12 @@ bot = telebot.TeleBot(TOKEN)
 
 COOKIE_FILE = "aternos_cookies.json"
 
-# ---------- ФУНКЦИИ РАБОТЫ С КУКАМИ ----------
 def save_cookies(cookies):
-    """Сохраняет куки в файл в формате Playwright."""
     with open(COOKIE_FILE, 'w') as f:
         json.dump(cookies, f, indent=2)
     print("🍪 Куки сохранены в файл")
 
 def load_cookies():
-    """Загружает куки из файла, если он существует."""
     if os.path.exists(COOKIE_FILE):
         with open(COOKIE_FILE, 'r') as f:
             cookies = json.load(f)
@@ -66,11 +63,9 @@ def load_cookies():
         return cookies
     return None
 
-# ---------- ОСНОВНАЯ ФУНКЦИЯ ----------
 async def get_aternos_status():
     print("🚀 Запуск get_aternos_status")
     async with async_playwright() as p:
-        # Запускаем браузер с параметрами для обхода детекции
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -82,13 +77,9 @@ async def get_aternos_status():
                 '--disable-features=IsolateOrigins,site-per-process',
                 '--disable-setuid-sandbox',
                 '--disable-web-security',
-                '--disable-features=BlockInsecurePrivateNetworkRequests',
-                '--disable-features=OutOfBlinkCors',
-                '--disable-blink-features=AutomationControlled',
             ],
             timeout=30000
         )
-        # Создаем контекст с реалистичным User-Agent
         context = await browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
             viewport={'width': 1920, 'height': 1080},
@@ -98,7 +89,7 @@ async def get_aternos_status():
         page = await context.new_page()
 
         try:
-            # Пробуем загрузить сохранённые куки
+            # Пробуем загрузить куки
             cookies = load_cookies()
             if cookies:
                 await context.add_cookies(cookies)
@@ -108,48 +99,95 @@ async def get_aternos_status():
             await page.goto(server_url, timeout=60000, wait_until='networkidle')
             print(f"✅ Страница загружена, URL: {page.url}")
 
-            # Ждём 3 секунды для стабилизации
             await page.wait_for_timeout(3000)
 
-            # Проверяем, не попали ли на /go/ или страницу логина
             if "/go/" in page.url:
                 print("⚠️ Перенаправлен на /go/ — сессия невалидна, пробуем логин")
-                # Если есть куки, но они не работают, удаляем их
                 if cookies:
                     os.remove(COOKIE_FILE)
                     print("🗑️ Удалены невалидные куки")
-                # Переходим на страницу логина
+                # Переходим на логин
+                print("🌐 Переход на страницу логина...")
                 await page.goto("https://aternos.org/login/", timeout=60000, wait_until='networkidle')
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(3000)
+                print(f"✅ Страница логина загружена, URL: {page.url}")
 
-            # Если на странице логина — выполняем вход
+            # Проверяем, на странице ли логина
             if "login" in page.url or "signin" in page.url:
-                print("🔑 Требуется логин")
-                # Заполняем форму
-                await page.fill('input[name="username"]', ATERNOS_USERNAME)
-                await page.fill('input[name="password"]', ATERNOS_PASSWORD)
-                # Жмём кнопку входа
-                await page.click('button[type="submit"]')
-                print("⏳ Ожидаем входа...")
-                await page.wait_for_timeout(5000)  # ждём редиректа
-                # После логина сохраняем куки
+                print("🔑 Начинаем процесс логина")
+
+                # Сохраняем скриншот страницы логина для отладки
+                screenshot = await page.screenshot()
+                with open("login_page.png", "wb") as f:
+                    f.write(screenshot)
+                print("📸 Скриншот страницы логина сохранён как login_page.png")
+
+                # Проверяем наличие формы
+                username_field = await page.query_selector('input[name="username"]')
+                password_field = await page.query_selector('input[name="password"]')
+                submit_button = await page.query_selector('button[type="submit"]')
+
+                if not username_field:
+                    print("❌ Поле username не найдено!")
+                    # Сохраняем HTML для анализа
+                    html = await page.content()
+                    with open("login_page.html", "w", encoding="utf-8") as f:
+                        f.write(html)
+                    raise RuntimeError("Поле username не найдено на странице логина")
+                if not password_field:
+                    print("❌ Поле password не найдено!")
+                    html = await page.content()
+                    with open("login_page.html", "w", encoding="utf-8") as f:
+                        f.write(html)
+                    raise RuntimeError("Поле password не найдено на странице логина")
+                if not submit_button:
+                    print("❌ Кнопка submit не найдена!")
+                    html = await page.content()
+                    with open("login_page.html", "w", encoding="utf-8") as f:
+                        f.write(html)
+                    raise RuntimeError("Кнопка submit не найдена на странице логина")
+
+                print("✅ Форма логина найдена, заполняем...")
+                await username_field.fill(ATERNOS_USERNAME)
+                print("✅ Имя пользователя введено")
+                await password_field.fill(ATERNOS_PASSWORD)
+                print("✅ Пароль введён")
+                await submit_button.click()
+                print("⏳ Кнопка входа нажата, ожидаем редиректа...")
+
+                # Ждём редиректа после логина (максимум 30 секунд)
+                try:
+                    await page.wait_for_url(lambda url: "/server/" in url or "login" not in url, timeout=30000)
+                    print(f"✅ Редирект выполнен, текущий URL: {page.url}")
+                except:
+                    print("⚠️ Редиректа не произошло, возможно, ошибка входа")
+                    # Сохраняем скриншот после попытки входа
+                    screenshot = await page.screenshot()
+                    with open("login_after.png", "wb") as f:
+                        f.write(screenshot)
+                    html = await page.content()
+                    with open("login_after.html", "w", encoding="utf-8") as f:
+                        f.write(html)
+                    raise RuntimeError("Не удалось войти: редирект не произошёл")
+
+                # Сохраняем новые куки
                 new_cookies = await context.cookies()
                 save_cookies(new_cookies)
-                print(f"✅ После логина URL: {page.url}")
-                # Если после логина нас не перенаправило на страницу сервера, идём туда
+
+                # Если после редиректа мы не на странице сервера, переходим туда
                 if "/server/" not in page.url:
+                    print("🌐 Переход на страницу сервера...")
                     await page.goto(server_url, timeout=60000, wait_until='networkidle')
                     await page.wait_for_timeout(3000)
+                    print(f"✅ Страница сервера загружена, URL: {page.url}")
 
-            # Теперь мы должны быть на странице сервера. Ждём появления элемента статуса.
+            # Теперь ждём элемент статуса
             print("⏳ Ожидаем элемент статуса...")
             try:
-                # Ждём появления span.statuslabel-label с таймаутом 30 секунд
                 await page.wait_for_selector('span.statuslabel-label', timeout=30000)
                 print("✅ Элемент статуса найден")
             except Exception as e:
                 print(f"❌ Элемент статуса не появился: {e}")
-                # Сохраняем скриншот и HTML для отладки
                 screenshot = await page.screenshot()
                 with open("error_screenshot.png", "wb") as f:
                     f.write(screenshot)
@@ -158,7 +196,6 @@ async def get_aternos_status():
                     f.write(html)
                 raise RuntimeError("Не удалось дождаться элемента статуса")
 
-            # Получаем статус
             status_element = await page.query_selector('span.statuslabel-label')
             if status_element:
                 status_text = await status_element.inner_text()
@@ -176,7 +213,6 @@ async def get_aternos_status():
 
         except Exception as e:
             print(f"❌ Ошибка: {e}")
-            # Сохраняем скриншот и HTML для анализа
             try:
                 screenshot = await page.screenshot()
                 with open("error_screenshot.png", "wb") as f:
@@ -193,7 +229,6 @@ async def get_aternos_status():
             import gc
             gc.collect()
 
-# ---------- СИНХРОННАЯ ОБЁРТКА ----------
 def get_status_sync():
     try:
         loop = asyncio.new_event_loop()
@@ -205,7 +240,6 @@ def get_status_sync():
         print(f"Ошибка в синхронной обёртке: {e}")
         return None
 
-# ---------- КОМАНДЫ ----------
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     bot.reply_to(message, "Привет! Я бот для управления сервером Aternos.\n"
@@ -230,7 +264,6 @@ def cmd_start_server(message):
 def cmd_stop_server(message):
     bot.reply_to(message, "⏳ Функция остановки в разработке")
 
-# ---------- ЗАПУСК БОТА ----------
 def run_bot():
     restart_count = 0
     base_wait = 2
