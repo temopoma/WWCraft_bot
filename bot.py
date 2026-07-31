@@ -6,10 +6,10 @@ import requests
 import telebot
 from telebot import apihelper
 
-# ---------- ИМПОРТ ATERNOS ----------
+# ---------- УНИВЕРСАЛЬНЫЙ ИМПОРТ ATERNOS ----------
 from python_aternos import Client
 
-# Пытаемся импортировать CloudflareError из разных мест
+# Пытаемся импортировать CloudflareError
 try:
     from python_aternos import CloudflareError
 except ImportError:
@@ -18,7 +18,7 @@ except ImportError:
     except ImportError:
         class CloudflareError(Exception):
             pass
-# -----------------------------------
+# --------------------------------------------------
 
 apihelper.CONNECT_TIMEOUT = 40
 apihelper.READ_TIMEOUT = 40
@@ -51,21 +51,41 @@ bot = telebot.TeleBot(TOKEN)
 _client = None
 _server = None
 
+def _create_client():
+    """Создаёт клиент, пробуя разные варианты параметров."""
+    # Сначала пробуем с use_cloudscraper
+    try:
+        return Client(use_cloudscraper=True)
+    except TypeError:
+        # Если не поддерживается, пробуем без параметров
+        try:
+            return Client()
+        except:
+            # Если и так не работает, просто Client() без аргументов
+            return Client()
+
+def _get_server_list(client):
+    """Получает список серверов, пробуя разные имена методов."""
+    # Пробуем list_servers
+    if hasattr(client, 'list_servers'):
+        return client.list_servers()
+    # Пробуем get_servers
+    if hasattr(client, 'get_servers'):
+        return client.get_servers()
+    # Пробуем servers (атрибут)
+    if hasattr(client, 'servers'):
+        return client.servers
+    # Если ничего нет, выбрасываем ошибку
+    raise AttributeError("Не удалось найти метод для получения списка серверов")
+
 def ensure_client():
     global _client
     if _client is None:
         try:
-            # Попытка с поддержкой cloudscraper
-            _client = Client(use_cloudscraper=True)
-            logger.info("🔑 Логинимся в Aternos с use_cloudscraper...")
+            _client = _create_client()
+            logger.info("🔑 Логинимся в Aternos...")
             _client.login(ATERNOS_USERNAME, ATERNOS_PASSWORD)
             logger.info("✅ Успешный вход")
-        except TypeError:
-            # Если параметр не поддерживается, создаём клиент без параметров
-            logger.warning("use_cloudscraper не поддерживается, пробуем без него")
-            _client = Client()
-            _client.login(ATERNOS_USERNAME, ATERNOS_PASSWORD)
-            logger.info("✅ Успешный вход (без cloudscraper)")
         except Exception as e:
             logger.error(f"Ошибка при логине: {e}")
             raise
@@ -75,17 +95,19 @@ def ensure_server():
     global _server
     if _server is None:
         client = ensure_client()
-        servers = client.list_servers()
+        servers = _get_server_list(client)
         if not servers:
             raise RuntimeError("Список серверов пуст")
         for s in servers:
-            if s.address == SERVER_ADDRESS:
+            # Адрес может быть в атрибуте address или domain
+            addr = getattr(s, 'address', None) or getattr(s, 'domain', None)
+            if addr == SERVER_ADDRESS:
                 _server = s
                 break
         if _server is None:
-            logger.warning(f"Сервер {SERVER_ADDRESS} не найден, беру первый: {servers[0].address}")
+            logger.warning(f"Сервер {SERVER_ADDRESS} не найден, беру первый: {getattr(servers[0], 'address', 'unknown')}")
             _server = servers[0]
-        logger.info(f"✅ Выбран сервер: {_server.address}")
+        logger.info(f"✅ Выбран сервер: {getattr(_server, 'address', getattr(_server, 'domain', 'unknown'))}")
     return _server
 
 def safe_server_call(message, action_func, success_msg, error_msg="❌ Ошибка"):
@@ -120,16 +142,24 @@ def cmd_start(message):
 def cmd_status(message):
     try:
         server = ensure_server()
-        server.fetch()
-        bot.reply_to(message, f"🟢 Статус сервера: {server.status}")
+        # Пробуем fetch() для обновления статуса
+        if hasattr(server, 'fetch'):
+            server.fetch()
+        # Статус может быть в атрибуте status или state
+        status = getattr(server, 'status', None)
+        if status is None:
+            status = getattr(server, 'state', 'неизвестно')
+        bot.reply_to(message, f"🟢 Статус сервера: {status}")
     except CloudflareError:
         global _client, _server
         _client = None
         _server = None
         try:
             server = ensure_server()
-            server.fetch()
-            bot.reply_to(message, f"🟢 Статус сервера: {server.status}")
+            if hasattr(server, 'fetch'):
+                server.fetch()
+            status = getattr(server, 'status', getattr(server, 'state', 'неизвестно'))
+            bot.reply_to(message, f"🟢 Статус сервера: {status}")
         except Exception as e:
             bot.reply_to(message, "❌ Ошибка Cloudflare, попробуйте позже.")
     except Exception as e:
@@ -139,7 +169,7 @@ def cmd_status(message):
 def cmd_start_server(message):
     safe_server_call(
         message,
-        lambda s: s.start(),
+        lambda s: s.start() if hasattr(s, 'start') else None,
         "✅ Сервер запускается...",
         "❌ Не удалось запустить сервер"
     )
@@ -148,7 +178,7 @@ def cmd_start_server(message):
 def cmd_stop_server(message):
     safe_server_call(
         message,
-        lambda s: s.stop(),
+        lambda s: s.stop() if hasattr(s, 'stop') else None,
         "✅ Сервер останавливается...",
         "❌ Не удалось остановить сервер"
     )
