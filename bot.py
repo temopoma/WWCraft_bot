@@ -53,7 +53,8 @@ bot = telebot.TeleBot(TOKEN)
 COOKIE_FILE = "aternos_cookies.json"
 
 async def get_aternos_status():
-    """Запускает браузер, логинится и возвращает статус сервера с расширенной отладкой."""
+    """Запускает браузер, логинится и возвращает статус сервера."""
+    logger.info("🚀 Функция get_aternos_status запущена")
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -86,9 +87,12 @@ async def get_aternos_status():
             server_url = f"https://aternos.org/server/{SERVER_ADDRESS}"
             logger.info(f"🌐 Переход на {server_url}")
             await page.goto(server_url, timeout=60000, wait_until='domcontentloaded')
+            logger.info(f"✅ Страница загружена, текущий URL: {page.url}")
+
+            # Небольшая задержка для полной загрузки
             await page.wait_for_timeout(3000)
 
-            # Проверяем логин
+            # Проверяем, не попали ли на страницу логина
             if "login" in page.url or "signin" in page.url:
                 logger.info("🔑 Требуется логин")
                 try:
@@ -100,114 +104,68 @@ async def get_aternos_status():
                     import json
                     with open(COOKIE_FILE, 'w') as f:
                         json.dump(cookies, f, indent=2)
-                    logger.info("🍪 Cookies сохранены")
+                    logger.info("🍪 Cookies сохранены после логина")
+                    # Обновляем URL после логина
+                    logger.info(f"✅ После логина URL: {page.url}")
                 except Exception as e:
                     logger.error(f"Ошибка при логине: {e}")
                     raise
 
-            # ---------- ОТЛАДКА: Сохраняем HTML страницы ----------
-            html_content = await page.content()
-            with open("page_debug.html", "w", encoding="utf-8") as f:
-                f.write(html_content)
-            logger.info("📄 HTML-код страницы сохранён в page_debug.html")
-
-            # ---------- ОТЛАДКА: Ищем элементы с ключевыми классами ----------
-            # Получаем все элементы с классами, содержащими статус-слова
-            elements_info = await page.evaluate('''() => {
-                const results = [];
-                const all = document.querySelectorAll('*');
-                const keywords = ['status', 'online', 'offline', 'server', 'state', 'info'];
-                for (const el of all) {
-                    if (el.className && typeof el.className === 'string') {
-                        const classes = el.className.split(' ');
-                        for (const cls of classes) {
-                            if (keywords.some(k => cls.toLowerCase().includes(k))) {
-                                results.push({
-                                    tag: el.tagName,
-                                    className: cls,
-                                    text: el.innerText ? el.innerText.trim().slice(0, 50) : ''
-                                });
-                            }
-                        }
-                    }
-                }
-                return results;
-            }''')
-            logger.info(f"🔍 Найдены элементы с ключевыми классами: {elements_info}")
-
-            # ---------- ПОИСК СТАТУСА ----------
+            # ---------- ТОЧНЫЙ ПОИСК СТАТУСА ----------
             status = None
 
-            # 1. Ищем элемент с текстом "online" или "offline" (без учёта регистра)
+            # Ищем элемент с классом statuslabel-label
             try:
-                online_elem = await page.query_selector('text=online')
-                offline_elem = await page.query_selector('text=offline')
-                if online_elem:
-                    status = 'online'
-                elif offline_elem:
-                    status = 'offline'
-            except:
-                pass
+                status_element = await page.query_selector('span.statuslabel-label')
+                if status_element:
+                    status_text = await status_element.inner_text()
+                    status_text = status_text.strip().lower()
+                    logger.info(f"🔍 Найден статусный элемент, текст: '{status_text}'")
+                    if 'онлайн' in status_text or 'online' in status_text:
+                        status = 'online'
+                    elif 'офлайн' in status_text or 'offline' in status_text:
+                        status = 'offline'
+                    else:
+                        status = status_text  # на всякий случай
+                else:
+                    logger.warning("⚠️ Элемент span.statuslabel-label не найден")
+            except Exception as e:
+                logger.error(f"Ошибка при поиске статусного элемента: {e}")
 
-            # 2. Ищем по классам
+            # ---------- ФОЛБЭК: если не нашли, пробуем другие методы ----------
             if status is None:
-                for cls in ['status', 'server-status', 'state', 'server-state']:
-                    elem = await page.query_selector(f'.{cls}')
-                    if elem:
-                        text = await elem.inner_text()
-                        text = text.strip().lower()
-                        if 'online' in text:
-                            status = 'online'
-                            break
-                        elif 'offline' in text:
-                            status = 'offline'
-                            break
-                        else:
-                            status = text
-                            break
-
-            # 3. Ищем кнопку запуска/остановки (самый надёжный способ)
-            if status is None:
+                logger.info("🔄 Пробуем альтернативные методы поиска статуса")
+                # Поиск по кнопкам
                 start_btn = await page.query_selector('button[data-action="start"]')
                 stop_btn = await page.query_selector('button[data-action="stop"]')
                 if stop_btn:
                     status = 'online'
+                    logger.info("✅ Статус определён по кнопке Stop")
                 elif start_btn:
                     status = 'offline'
+                    logger.info("✅ Статус определён по кнопке Start")
                 else:
-                    # Пробуем другие варианты кнопок
-                    start_btn_any = await page.query_selector('button:has-text("Start")')
-                    stop_btn_any = await page.query_selector('button:has-text("Stop")')
-                    if stop_btn_any:
+                    # Поиск по тексту на странице
+                    body_text = await page.inner_text('body')
+                    body_lower = body_text.lower()
+                    if 'онлайн' in body_lower or 'online' in body_lower:
                         status = 'online'
-                    elif start_btn_any:
+                        logger.info("✅ Статус определён по тексту страницы (онлайн)")
+                    elif 'офлайн' in body_lower or 'offline' in body_lower:
                         status = 'offline'
+                        logger.info("✅ Статус определён по тексту страницы (офлайн)")
 
-            # 4. Ищем атрибут data-status
+            # Если статус не определён — unknown
             if status is None:
-                status_elem = await page.query_selector('[data-status]')
-                if status_elem:
-                    data_status = await status_elem.get_attribute('data-status')
-                    if data_status:
-                        status = data_status.lower()
+                status = 'unknown'
+                logger.warning("⚠️ Статус не удалось определить")
 
-            # 5. Если всё ещё неизвестно, берём текст всей страницы и ищем подстроки
-            if status is None:
-                body_text = await page.inner_text('body')
-                body_text_lower = body_text.lower()
-                if 'online' in body_text_lower:
-                    status = 'online'
-                elif 'offline' in body_text_lower:
-                    status = 'offline'
-                else:
-                    status = 'unknown'
-
-            logger.info(f"📊 Определён статус: {status}")
+            logger.info(f"📊 Итоговый статус: {status}")
             return status
 
         except Exception as e:
-            logger.error(f"Ошибка при получении статуса: {e}")
-            # Сохраняем скриншот
+            logger.error(f"❌ Ошибка при получении статуса: {e}")
+            # Делаем скриншот для отладки
             try:
                 screenshot = await page.screenshot()
                 with open("error_screenshot.png", "wb") as f:
