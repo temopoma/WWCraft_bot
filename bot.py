@@ -29,13 +29,9 @@ TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
     sys.exit("❌ BOT_TOKEN не задан")
 
-ATERNOS_USERNAME = os.environ.get("ATERNOS_USERNAME", "")  # не обязателен, но может пригодиться
-ATERNOS_PASSWORD = os.environ.get("ATERNOS_PASSWORD", "")
-
-# ID администратора (ваш Telegram ID)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 if not ADMIN_ID:
-    sys.exit("❌ ADMIN_ID не задан (укажите ваш Telegram ID)")
+    sys.exit("❌ ADMIN_ID не задан")
 
 SERVER_ADDRESS = os.environ.get("SERVER_ADDRESS", "WWCraft-48Fh.aternos.me")
 COOKIE_FILE = "cookies.json"
@@ -53,24 +49,62 @@ logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(TOKEN)
 
-# ---------- РАБОТА С КУКАМИ ----------
+# ---------- НОРМАЛИЗАЦИЯ КУК ----------
+def normalize_cookies(cookies):
+    """
+    Приводит куки к формату, который принимает Playwright:
+    - sameSite: одно из 'Strict', 'Lax', 'None'
+    - проверяет наличие обязательных полей
+    """
+    normalized = []
+    for cookie in cookies:
+        # Приводим sameSite
+        same_site = cookie.get("sameSite", "Lax")
+        if same_site.lower() == "no_restriction":
+            same_site = "None"
+        elif same_site.lower() == "unspecified":
+            same_site = "Lax"
+        elif same_site not in ("Strict", "Lax", "None"):
+            # по умолчанию ставим Lax
+            same_site = "Lax"
+
+        # Обеспечиваем наличие обязательных полей
+        new_cookie = {
+            "name": cookie.get("name", ""),
+            "value": cookie.get("value", ""),
+            "domain": cookie.get("domain", ""),
+            "path": cookie.get("path", "/"),
+            "sameSite": same_site,
+            "secure": cookie.get("secure", False),
+            "httpOnly": cookie.get("httpOnly", False),
+        }
+        # expires может быть необязательным, но если есть – передаём
+        if "expires" in cookie:
+            new_cookie["expires"] = cookie["expires"]
+        if "expiry" in cookie:  # иногда называется expiry
+            new_cookie["expires"] = cookie["expiry"]
+
+        normalized.append(new_cookie)
+    return normalized
+
 def save_cookies(cookies):
-    """Сохраняет куки в файл в формате Playwright."""
+    """Сохраняет нормализованные куки в файл."""
+    normalized = normalize_cookies(cookies)
     with open(COOKIE_FILE, 'w') as f:
-        json.dump(cookies, f, indent=2)
-    logger.info("🍪 Куки сохранены в файл")
+        json.dump(normalized, f, indent=2)
+    logger.info(f"🍪 Сохранено {len(normalized)} кук в файл")
 
 def load_cookies():
-    """Загружает куки из файла, если он существует."""
+    """Загружает куки из файла и нормализует их."""
     if os.path.exists(COOKIE_FILE):
         with open(COOKIE_FILE, 'r') as f:
             cookies = json.load(f)
-        logger.info("🍪 Куки загружены из файла")
-        return cookies
+        normalized = normalize_cookies(cookies)
+        logger.info(f"🍪 Загружено {len(normalized)} кук из файла")
+        return normalized
     return None
 
 def notify_admin(text):
-    """Отправляет сообщение администратору."""
     try:
         bot.send_message(ADMIN_ID, text)
     except Exception as e:
@@ -78,10 +112,9 @@ def notify_admin(text):
 
 # ---------- ОСНОВНАЯ ФУНКЦИЯ ПОЛУЧЕНИЯ СТАТУСА ----------
 async def get_aternos_status():
-    """Проверяет статус сервера, используя сохранённые куки."""
     cookies = load_cookies()
     if not cookies:
-        logger.warning("⚠️ Куки не найдены! Используйте /update_cookies для загрузки.")
+        logger.warning("⚠️ Куки не найдены!")
         return None, "no_cookies"
 
     async with async_playwright() as p:
@@ -109,17 +142,14 @@ async def get_aternos_status():
             await page.goto(server_url, timeout=60000, wait_until='networkidle')
             logger.info(f"✅ Страница загружена, URL: {page.url}")
 
-            # Если перенаправило на /go/ или логин – куки невалидны
             if "/go/" in page.url or "login" in page.url or "signin" in page.url:
                 logger.warning("⚠️ Куки невалидны (редирект на /go/ или логин)")
                 return None, "invalid_cookies"
 
-            # Ждём элемент статуса
             try:
                 await page.wait_for_selector('span.statuslabel-label', timeout=15000)
             except:
-                # Возможно, страница не загрузилась полностью
-                logger.warning("⚠️ Элемент статуса не найден, возможно, страница изменилась")
+                logger.warning("⚠️ Элемент статуса не найден")
                 return None, "unknown"
 
             status_element = await page.query_selector('span.statuslabel-label')
@@ -144,19 +174,18 @@ async def get_aternos_status():
             import gc
             gc.collect()
 
-# ---------- СИНХРОННАЯ ОБЁРТКА ДЛЯ TELEBOT ----------
 def get_status_sync():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        result, status_code = loop.run_until_complete(get_aternos_status())
+        result, code = loop.run_until_complete(get_aternos_status())
         loop.close()
-        return result, status_code
+        return result, code
     except Exception as e:
         logger.error(f"Ошибка в синхронной обёртке: {e}")
         return None, "error"
 
-# ---------- КОМАНДЫ БОТА ----------
+# ---------- КОМАНДЫ ----------
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     bot.reply_to(message, "Привет! Я бот для управления сервером Aternos.\n"
@@ -170,10 +199,10 @@ def cmd_status(message):
 
     if code == "no_cookies":
         bot.reply_to(message, "❌ Куки не найдены. Используйте /update_cookies для их загрузки.")
-        notify_admin("⚠️ Куки не найдены в боте. Загрузите новые с помощью /update_cookies.")
+        notify_admin("⚠️ Куки не найдены. Загрузите новые через /update_cookies.")
         return
     elif code == "invalid_cookies":
-        bot.reply_to(message, "❌ Куки истекли или невалидны. Пожалуйста, обновите их через /update_cookies.")
+        bot.reply_to(message, "❌ Куки истекли или невалидны. Обновите через /update_cookies.")
         notify_admin("⚠️ Куки Aternos истекли! Обновите их через /update_cookies.")
         return
     elif code == "unknown":
@@ -184,64 +213,52 @@ def cmd_status(message):
         return
 
     if status is None:
-        bot.reply_to(message, "❌ Не удалось получить статус.")
+        bot.reply_to(message, "❌ Статус не определён.")
     else:
         bot.reply_to(message, f"🟢 Статус сервера: {status}")
 
 @bot.message_handler(commands=['update_cookies'])
 def cmd_update_cookies(message):
-    # Проверяем, что отправитель — администратор
     if message.from_user.id != ADMIN_ID:
         bot.reply_to(message, "❌ У вас нет прав для этой команды.")
         return
 
     bot.reply_to(message, "📩 Отправьте файл cookies.json или вставьте JSON-текст с куками.")
-
-    # Регистрируем следующий шаг – ожидаем ответ с куками
     bot.register_next_step_handler(message, process_cookies_input)
 
 def process_cookies_input(message):
-    """Обрабатывает полученные куки (файл или текст)."""
     try:
         cookies = None
-
-        # Если это файл
         if message.document:
             file_info = bot.get_file(message.document.file_id)
             downloaded_file = bot.download_file(file_info.file_path)
             try:
                 cookies = json.loads(downloaded_file.decode('utf-8'))
             except:
-                bot.reply_to(message, "❌ Не удалось распарсить JSON из файла. Убедитесь, что это правильный формат кук.")
+                bot.reply_to(message, "❌ Не удалось распарсить JSON из файла.")
                 return
-
-        # Если это текст (JSON)
         elif message.text:
             try:
                 cookies = json.loads(message.text)
             except:
-                bot.reply_to(message, "❌ Не удалось распарсить JSON. Убедитесь, что вы отправили валидный JSON.")
+                bot.reply_to(message, "❌ Не удалось распарсить JSON.")
                 return
-
         else:
-            bot.reply_to(message, "❌ Пожалуйста, отправьте файл cookies.json или текст с JSON.")
+            bot.reply_to(message, "❌ Отправьте файл или JSON-текст.")
             return
 
-        # Проверяем, что это список кук (ожидаемый формат Playwright)
         if not isinstance(cookies, list):
             bot.reply_to(message, "❌ Неверный формат: ожидается массив кук.")
             return
 
-        # Сохраняем куки
         save_cookies(cookies)
-        bot.reply_to(message, "✅ Куки успешно обновлены! Теперь вы можете использовать /status.")
+        bot.reply_to(message, f"✅ Куки успешно обновлены ({len(cookies)} шт.)! Теперь используйте /status.")
         logger.info("✅ Куки обновлены администратором")
 
     except Exception as e:
         logger.error(f"Ошибка при обновлении кук: {e}")
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
-# ---------- ЗАПУСК БОТА ----------
 def run_bot():
     restart_count = 0
     base_wait = 2
