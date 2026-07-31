@@ -53,7 +53,7 @@ bot = telebot.TeleBot(TOKEN)
 COOKIE_FILE = "aternos_cookies.json"
 
 async def get_aternos_status():
-    """Запускает браузер, логинится и возвращает статус сервера."""
+    """Запускает браузер, логинится и возвращает статус сервера с расширенной отладкой."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -75,7 +75,7 @@ async def get_aternos_status():
         page = await context.new_page()
 
         try:
-            # Загружаем сохранённые cookies, если есть
+            # Загружаем сохранённые cookies
             if os.path.exists(COOKIE_FILE):
                 import json
                 with open(COOKIE_FILE, 'r') as f:
@@ -83,24 +83,19 @@ async def get_aternos_status():
                 await context.add_cookies(cookies)
                 logger.info("🍪 Загружены сохранённые cookies")
 
-            # Переходим на главную страницу сервера
             server_url = f"https://aternos.org/server/{SERVER_ADDRESS}"
             logger.info(f"🌐 Переход на {server_url}")
             await page.goto(server_url, timeout=60000, wait_until='domcontentloaded')
-
-            # Ждём, пока страница полностью загрузится, проверяем наличие Cloudflare
             await page.wait_for_timeout(3000)
 
-            # Проверяем, не попали ли на страницу логина
+            # Проверяем логин
             if "login" in page.url or "signin" in page.url:
                 logger.info("🔑 Требуется логин")
-                # Пробуем заполнить форму
                 try:
                     await page.fill('input[name="username"]', ATERNOS_USERNAME, timeout=5000)
                     await page.fill('input[name="password"]', ATERNOS_PASSWORD, timeout=5000)
                     await page.click('button[type="submit"]', timeout=5000)
                     await page.wait_for_timeout(5000)
-                    # Сохраняем cookies после логина
                     cookies = await context.cookies()
                     import json
                     with open(COOKIE_FILE, 'w') as f:
@@ -110,40 +105,69 @@ async def get_aternos_status():
                     logger.error(f"Ошибка при логине: {e}")
                     raise
 
-            # Теперь мы должны быть на странице сервера
-            # Пробуем найти статус разными способами
+            # ---------- ОТЛАДКА: Сохраняем HTML страницы ----------
+            html_content = await page.content()
+            with open("page_debug.html", "w", encoding="utf-8") as f:
+                f.write(html_content)
+            logger.info("📄 HTML-код страницы сохранён в page_debug.html")
 
-            # Способ 1: ищем элемент с классом server-status (старый метод)
+            # ---------- ОТЛАДКА: Ищем элементы с ключевыми классами ----------
+            # Получаем все элементы с классами, содержащими статус-слова
+            elements_info = await page.evaluate('''() => {
+                const results = [];
+                const all = document.querySelectorAll('*');
+                const keywords = ['status', 'online', 'offline', 'server', 'state', 'info'];
+                for (const el of all) {
+                    if (el.className && typeof el.className === 'string') {
+                        const classes = el.className.split(' ');
+                        for (const cls of classes) {
+                            if (keywords.some(k => cls.toLowerCase().includes(k))) {
+                                results.push({
+                                    tag: el.tagName,
+                                    className: cls,
+                                    text: el.innerText ? el.innerText.trim().slice(0, 50) : ''
+                                });
+                            }
+                        }
+                    }
+                }
+                return results;
+            }''')
+            logger.info(f"🔍 Найдены элементы с ключевыми классами: {elements_info}")
+
+            # ---------- ПОИСК СТАТУСА ----------
             status = None
-            selectors = [
-                '.server-status',
-                '.status',
-                '.server-info .status',
-                '[data-status]',
-                '.online',
-                '.offline'
-            ]
-            for selector in selectors:
-                try:
-                    element = await page.wait_for_selector(selector, timeout=5000)
-                    if element:
-                        text = await element.inner_text()
+
+            # 1. Ищем элемент с текстом "online" или "offline" (без учёта регистра)
+            try:
+                online_elem = await page.query_selector('text=online')
+                offline_elem = await page.query_selector('text=offline')
+                if online_elem:
+                    status = 'online'
+                elif offline_elem:
+                    status = 'offline'
+            except:
+                pass
+
+            # 2. Ищем по классам
+            if status is None:
+                for cls in ['status', 'server-status', 'state', 'server-state']:
+                    elem = await page.query_selector(f'.{cls}')
+                    if elem:
+                        text = await elem.inner_text()
                         text = text.strip().lower()
-                        if 'online' in text or 'on' in text:
+                        if 'online' in text:
                             status = 'online'
                             break
-                        elif 'offline' in text or 'off' in text:
+                        elif 'offline' in text:
                             status = 'offline'
                             break
                         else:
                             status = text
                             break
-                except:
-                    continue
 
-            # Способ 2: если не нашли, ищем кнопку запуска/остановки
+            # 3. Ищем кнопку запуска/остановки (самый надёжный способ)
             if status is None:
-                # Кнопка "Start" или "Stop" часто имеет атрибут data-action
                 start_btn = await page.query_selector('button[data-action="start"]')
                 stop_btn = await page.query_selector('button[data-action="stop"]')
                 if stop_btn:
@@ -151,14 +175,29 @@ async def get_aternos_status():
                 elif start_btn:
                     status = 'offline'
                 else:
-                    status = 'unknown'
+                    # Пробуем другие варианты кнопок
+                    start_btn_any = await page.query_selector('button:has-text("Start")')
+                    stop_btn_any = await page.query_selector('button:has-text("Stop")')
+                    if stop_btn_any:
+                        status = 'online'
+                    elif start_btn_any:
+                        status = 'offline'
 
-            # Способ 3: парсим весь текст страницы на наличие ключевых слов
-            if status is None or status == 'unknown':
-                page_text = await page.inner_text('body')
-                if 'online' in page_text.lower():
+            # 4. Ищем атрибут data-status
+            if status is None:
+                status_elem = await page.query_selector('[data-status]')
+                if status_elem:
+                    data_status = await status_elem.get_attribute('data-status')
+                    if data_status:
+                        status = data_status.lower()
+
+            # 5. Если всё ещё неизвестно, берём текст всей страницы и ищем подстроки
+            if status is None:
+                body_text = await page.inner_text('body')
+                body_text_lower = body_text.lower()
+                if 'online' in body_text_lower:
                     status = 'online'
-                elif 'offline' in page_text.lower():
+                elif 'offline' in body_text_lower:
                     status = 'offline'
                 else:
                     status = 'unknown'
@@ -168,7 +207,7 @@ async def get_aternos_status():
 
         except Exception as e:
             logger.error(f"Ошибка при получении статуса: {e}")
-            # Делаем скриншот для отладки (опционально)
+            # Сохраняем скриншот
             try:
                 screenshot = await page.screenshot()
                 with open("error_screenshot.png", "wb") as f:
