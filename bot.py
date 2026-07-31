@@ -2,12 +2,12 @@ import os
 import sys
 import time
 import logging
+import json
 import asyncio
 import subprocess
-import json
 import requests
 import telebot
-from telebot import apihelper
+from telebot import apihelper, types
 from playwright.async_api import async_playwright
 
 # ---------- УСТАНОВКА БРАУЗЕРА ----------
@@ -29,12 +29,16 @@ TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
     sys.exit("❌ BOT_TOKEN не задан")
 
-ATERNOS_USERNAME = os.environ.get("ATERNOS_USERNAME")
-ATERNOS_PASSWORD = os.environ.get("ATERNOS_PASSWORD")
-if not ATERNOS_USERNAME or not ATERNOS_PASSWORD:
-    sys.exit("❌ ATERNOS_USERNAME или ATERNOS_PASSWORD не заданы")
+ATERNOS_USERNAME = os.environ.get("ATERNOS_USERNAME", "")  # не обязателен, но может пригодиться
+ATERNOS_PASSWORD = os.environ.get("ATERNOS_PASSWORD", "")
 
-SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"
+# ID администратора (ваш Telegram ID)
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+if not ADMIN_ID:
+    sys.exit("❌ ADMIN_ID не задан (укажите ваш Telegram ID)")
+
+SERVER_ADDRESS = os.environ.get("SERVER_ADDRESS", "WWCraft-48Fh.aternos.me")
+COOKIE_FILE = "cookies.json"
 
 # ---------- ЛОГИРОВАНИЕ ----------
 logging.basicConfig(
@@ -42,29 +46,44 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("bot_errors.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(TOKEN)
 
-COOKIE_FILE = "aternos_cookies.json"
-
+# ---------- РАБОТА С КУКАМИ ----------
 def save_cookies(cookies):
+    """Сохраняет куки в файл в формате Playwright."""
     with open(COOKIE_FILE, 'w') as f:
         json.dump(cookies, f, indent=2)
-    print("🍪 Куки сохранены в файл")
+    logger.info("🍪 Куки сохранены в файл")
 
 def load_cookies():
+    """Загружает куки из файла, если он существует."""
     if os.path.exists(COOKIE_FILE):
         with open(COOKIE_FILE, 'r') as f:
             cookies = json.load(f)
-        print("🍪 Куки загружены из файла")
+        logger.info("🍪 Куки загружены из файла")
         return cookies
     return None
 
+def notify_admin(text):
+    """Отправляет сообщение администратору."""
+    try:
+        bot.send_message(ADMIN_ID, text)
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление админу: {e}")
+
+# ---------- ОСНОВНАЯ ФУНКЦИЯ ПОЛУЧЕНИЯ СТАТУСА ----------
 async def get_aternos_status():
-    print("🚀 Запуск get_aternos_status")
+    """Проверяет статус сервера, используя сохранённые куки."""
+    cookies = load_cookies()
+    if not cookies:
+        logger.warning("⚠️ Куки не найдены! Используйте /update_cookies для загрузки.")
+        return None, "no_cookies"
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -74,219 +93,178 @@ async def get_aternos_status():
                 '--disable-gpu',
                 '--disable-software-rasterizer',
                 '--disable-blink-features=AutomationControlled',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--disable-setuid-sandbox',
-                '--disable-web-security',
             ],
             timeout=30000
         )
         context = await browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            viewport={'width': 1920, 'height': 1080},
-            locale='ru-RU',
-            timezone_id='Europe/Moscow',
+            viewport={'width': 1920, 'height': 1080}
         )
+        await context.add_cookies(cookies)
         page = await context.new_page()
 
         try:
-            # Пробуем загрузить куки
-            cookies = load_cookies()
-            if cookies:
-                await context.add_cookies(cookies)
-
             server_url = f"https://aternos.org/server/{SERVER_ADDRESS}"
-            print(f"🌐 Переход на {server_url}")
+            logger.info(f"🌐 Переход на {server_url}")
             await page.goto(server_url, timeout=60000, wait_until='networkidle')
-            print(f"✅ Страница загружена, URL: {page.url}")
+            logger.info(f"✅ Страница загружена, URL: {page.url}")
 
-            await page.wait_for_timeout(3000)
+            # Если перенаправило на /go/ или логин – куки невалидны
+            if "/go/" in page.url or "login" in page.url or "signin" in page.url:
+                logger.warning("⚠️ Куки невалидны (редирект на /go/ или логин)")
+                return None, "invalid_cookies"
 
-            if "/go/" in page.url:
-                print("⚠️ Перенаправлен на /go/ — сессия невалидна, пробуем логин")
-                if cookies:
-                    os.remove(COOKIE_FILE)
-                    print("🗑️ Удалены невалидные куки")
-                # Переходим на логин
-                print("🌐 Переход на страницу логина...")
-                await page.goto("https://aternos.org/login/", timeout=60000, wait_until='networkidle')
-                await page.wait_for_timeout(3000)
-                print(f"✅ Страница логина загружена, URL: {page.url}")
-
-            # Проверяем, на странице ли логина
-            if "login" in page.url or "signin" in page.url:
-                print("🔑 Начинаем процесс логина")
-
-                # Сохраняем скриншот страницы логина для отладки
-                screenshot = await page.screenshot()
-                with open("login_page.png", "wb") as f:
-                    f.write(screenshot)
-                print("📸 Скриншот страницы логина сохранён как login_page.png")
-
-                # Проверяем наличие формы
-                username_field = await page.query_selector('input[name="username"]')
-                password_field = await page.query_selector('input[name="password"]')
-                submit_button = await page.query_selector('button[type="submit"]')
-
-                if not username_field:
-                    print("❌ Поле username не найдено!")
-                    # Сохраняем HTML для анализа
-                    html = await page.content()
-                    with open("login_page.html", "w", encoding="utf-8") as f:
-                        f.write(html)
-                    raise RuntimeError("Поле username не найдено на странице логина")
-                if not password_field:
-                    print("❌ Поле password не найдено!")
-                    html = await page.content()
-                    with open("login_page.html", "w", encoding="utf-8") as f:
-                        f.write(html)
-                    raise RuntimeError("Поле password не найдено на странице логина")
-                if not submit_button:
-                    print("❌ Кнопка submit не найдена!")
-                    html = await page.content()
-                    with open("login_page.html", "w", encoding="utf-8") as f:
-                        f.write(html)
-                    raise RuntimeError("Кнопка submit не найдена на странице логина")
-
-                print("✅ Форма логина найдена, заполняем...")
-                await username_field.fill(ATERNOS_USERNAME)
-                print("✅ Имя пользователя введено")
-                await password_field.fill(ATERNOS_PASSWORD)
-                print("✅ Пароль введён")
-                await submit_button.click()
-                print("⏳ Кнопка входа нажата, ожидаем редиректа...")
-
-                # Ждём редиректа после логина (максимум 30 секунд)
-                try:
-                    await page.wait_for_url(lambda url: "/server/" in url or "login" not in url, timeout=30000)
-                    print(f"✅ Редирект выполнен, текущий URL: {page.url}")
-                except:
-                    print("⚠️ Редиректа не произошло, возможно, ошибка входа")
-                    # Сохраняем скриншот после попытки входа
-                    screenshot = await page.screenshot()
-                    with open("login_after.png", "wb") as f:
-                        f.write(screenshot)
-                    html = await page.content()
-                    with open("login_after.html", "w", encoding="utf-8") as f:
-                        f.write(html)
-                    raise RuntimeError("Не удалось войти: редирект не произошёл")
-
-                # Сохраняем новые куки
-                new_cookies = await context.cookies()
-                save_cookies(new_cookies)
-
-                # Если после редиректа мы не на странице сервера, переходим туда
-                if "/server/" not in page.url:
-                    print("🌐 Переход на страницу сервера...")
-                    await page.goto(server_url, timeout=60000, wait_until='networkidle')
-                    await page.wait_for_timeout(3000)
-                    print(f"✅ Страница сервера загружена, URL: {page.url}")
-
-            # Теперь ждём элемент статуса
-            print("⏳ Ожидаем элемент статуса...")
+            # Ждём элемент статуса
             try:
-                await page.wait_for_selector('span.statuslabel-label', timeout=30000)
-                print("✅ Элемент статуса найден")
-            except Exception as e:
-                print(f"❌ Элемент статуса не появился: {e}")
-                screenshot = await page.screenshot()
-                with open("error_screenshot.png", "wb") as f:
-                    f.write(screenshot)
-                html = await page.content()
-                with open("debug_page.html", "w", encoding="utf-8") as f:
-                    f.write(html)
-                raise RuntimeError("Не удалось дождаться элемента статуса")
+                await page.wait_for_selector('span.statuslabel-label', timeout=15000)
+            except:
+                # Возможно, страница не загрузилась полностью
+                logger.warning("⚠️ Элемент статуса не найден, возможно, страница изменилась")
+                return None, "unknown"
 
             status_element = await page.query_selector('span.statuslabel-label')
             if status_element:
                 status_text = await status_element.inner_text()
                 status_text = status_text.strip().lower()
-                print(f"🔍 Найден статус: '{status_text}'")
+                logger.info(f"🔍 Статус: '{status_text}'")
                 if 'онлайн' in status_text or 'online' in status_text:
-                    return 'online'
+                    return 'online', "ok"
                 elif 'офлайн' in status_text or 'offline' in status_text:
-                    return 'offline'
+                    return 'offline', "ok"
                 else:
-                    return status_text
+                    return status_text, "ok"
             else:
-                print("⚠️ Элемент статуса не найден после ожидания")
-                return 'unknown'
+                return None, "unknown"
 
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            try:
-                screenshot = await page.screenshot()
-                with open("error_screenshot.png", "wb") as f:
-                    f.write(screenshot)
-                html = await page.content()
-                with open("debug_page.html", "w", encoding="utf-8") as f:
-                    f.write(html)
-                print("📸 Скриншот и HTML сохранены для отладки")
-            except:
-                pass
-            raise
+            logger.error(f"❌ Ошибка при запросе: {e}")
+            return None, "error"
         finally:
             await browser.close()
             import gc
             gc.collect()
 
+# ---------- СИНХРОННАЯ ОБЁРТКА ДЛЯ TELEBOT ----------
 def get_status_sync():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(get_aternos_status())
+        result, status_code = loop.run_until_complete(get_aternos_status())
         loop.close()
-        return result
+        return result, status_code
     except Exception as e:
-        print(f"Ошибка в синхронной обёртке: {e}")
-        return None
+        logger.error(f"Ошибка в синхронной обёртке: {e}")
+        return None, "error"
 
+# ---------- КОМАНДЫ БОТА ----------
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     bot.reply_to(message, "Привет! Я бот для управления сервером Aternos.\n"
                           "/status – проверить статус\n"
-                          "/start_server – запуск (в разработке)\n"
-                          "/stop_server – остановка (в разработке)")
+                          "/update_cookies – обновить куки (только для админа)")
 
 @bot.message_handler(commands=['status'])
 def cmd_status(message):
-    bot.reply_to(message, "⏳ Проверяю статус, подождите... (до 30 секунд)")
-    status = get_status_sync()
+    bot.reply_to(message, "⏳ Проверяю статус...")
+    status, code = get_status_sync()
+
+    if code == "no_cookies":
+        bot.reply_to(message, "❌ Куки не найдены. Используйте /update_cookies для их загрузки.")
+        notify_admin("⚠️ Куки не найдены в боте. Загрузите новые с помощью /update_cookies.")
+        return
+    elif code == "invalid_cookies":
+        bot.reply_to(message, "❌ Куки истекли или невалидны. Пожалуйста, обновите их через /update_cookies.")
+        notify_admin("⚠️ Куки Aternos истекли! Обновите их через /update_cookies.")
+        return
+    elif code == "unknown":
+        bot.reply_to(message, "❌ Не удалось определить статус (возможно, изменилась структура страницы).")
+        return
+    elif code == "error":
+        bot.reply_to(message, "❌ Ошибка при получении статуса. Проверьте логи.")
+        return
+
     if status is None:
-        bot.reply_to(message, "❌ Не удалось получить статус (ошибка или таймаут)")
+        bot.reply_to(message, "❌ Не удалось получить статус.")
     else:
         bot.reply_to(message, f"🟢 Статус сервера: {status}")
 
-@bot.message_handler(commands=['start_server'])
-def cmd_start_server(message):
-    bot.reply_to(message, "⏳ Функция запуска в разработке")
+@bot.message_handler(commands=['update_cookies'])
+def cmd_update_cookies(message):
+    # Проверяем, что отправитель — администратор
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ У вас нет прав для этой команды.")
+        return
 
-@bot.message_handler(commands=['stop_server'])
-def cmd_stop_server(message):
-    bot.reply_to(message, "⏳ Функция остановки в разработке")
+    bot.reply_to(message, "📩 Отправьте файл cookies.json или вставьте JSON-текст с куками.")
 
+    # Регистрируем следующий шаг – ожидаем ответ с куками
+    bot.register_next_step_handler(message, process_cookies_input)
+
+def process_cookies_input(message):
+    """Обрабатывает полученные куки (файл или текст)."""
+    try:
+        cookies = None
+
+        # Если это файл
+        if message.document:
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            try:
+                cookies = json.loads(downloaded_file.decode('utf-8'))
+            except:
+                bot.reply_to(message, "❌ Не удалось распарсить JSON из файла. Убедитесь, что это правильный формат кук.")
+                return
+
+        # Если это текст (JSON)
+        elif message.text:
+            try:
+                cookies = json.loads(message.text)
+            except:
+                bot.reply_to(message, "❌ Не удалось распарсить JSON. Убедитесь, что вы отправили валидный JSON.")
+                return
+
+        else:
+            bot.reply_to(message, "❌ Пожалуйста, отправьте файл cookies.json или текст с JSON.")
+            return
+
+        # Проверяем, что это список кук (ожидаемый формат Playwright)
+        if not isinstance(cookies, list):
+            bot.reply_to(message, "❌ Неверный формат: ожидается массив кук.")
+            return
+
+        # Сохраняем куки
+        save_cookies(cookies)
+        bot.reply_to(message, "✅ Куки успешно обновлены! Теперь вы можете использовать /status.")
+        logger.info("✅ Куки обновлены администратором")
+
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении кук: {e}")
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+# ---------- ЗАПУСК БОТА ----------
 def run_bot():
     restart_count = 0
     base_wait = 2
     while restart_count < 50:
         try:
             restart_count += 1
-            print(f"🔄 Попытка #{restart_count}")
+            logger.info(f"🔄 Попытка #{restart_count}")
             bot.polling(none_stop=True, interval=1, timeout=30, long_polling_timeout=5)
         except requests.exceptions.ConnectionError as e:
-            print(f"🌐 Сетевая ошибка: {e}. Переподключение через {base_wait}с")
+            logger.warning(f"🌐 Сетевая ошибка: {e}. Переподключение через {base_wait}с")
             time.sleep(base_wait)
             base_wait = min(base_wait * 1.5, 30)
         except Exception as e:
-            print(f"💥 Критическая ошибка: {e}")
+            logger.critical(f"💥 Критическая ошибка: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
     try:
         run_bot()
     except KeyboardInterrupt:
-        print("Бот остановлен вручную")
+        logger.info("Бот остановлен вручную")
     except Exception as e:
-        print(f"💥 ОШИБКА ПРИ ЗАПУСКЕ: {e}")
+        logger.critical(f"💥 ОШИБКА ПРИ ЗАПУСКЕ: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
