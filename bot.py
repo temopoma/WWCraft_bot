@@ -10,17 +10,17 @@ import telebot
 from telebot import apihelper
 from playwright.async_api import async_playwright
 
-# ---------- УСТАНОВКА БРАУЗЕРА (однократно) ----------
+# ---------- УСТАНОВКА БРАУЗЕРА ----------
 def install_browser():
     try:
         subprocess.run(["playwright", "install", "chromium", "--with-deps"], check=True, capture_output=True)
-        logging.info("✅ Chromium установлен")
+        print("✅ Chromium установлен")
     except Exception as e:
-        logging.error(f"❌ Ошибка установки Chromium: {e}")
+        print(f"❌ Ошибка установки Chromium: {e}")
 
 if not os.path.exists("/root/.cache/ms-playwright"):
     install_browser()
-# ----------------------------------------------------
+# ---------------------------------------
 
 apihelper.CONNECT_TIMEOUT = 40
 apihelper.READ_TIMEOUT = 40
@@ -34,15 +34,15 @@ ATERNOS_PASSWORD = os.environ.get("ATERNOS_PASSWORD")
 if not ATERNOS_USERNAME or not ATERNOS_PASSWORD:
     sys.exit("❌ ATERNOS_USERNAME или ATERNOS_PASSWORD не заданы")
 
-SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"  # замените, если нужно
+SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"  # замените на ваш
 
-# ---------- ЛОГИРОВАНИЕ ----------
+# ---------- ЛОГИРОВАНИЕ (для файла) ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("bot_errors.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
+        # Убираем StreamHandler, чтобы не дублировать, будем использовать print
     ]
 )
 logger = logging.getLogger(__name__)
@@ -51,9 +51,9 @@ bot = telebot.TeleBot(TOKEN)
 
 COOKIE_FILE = "aternos_cookies.json"
 
-# ---------- ОСНОВНАЯ ФУНКЦИЯ ПОЛУЧЕНИЯ СТАТУСА ----------
+# ---------- ОСНОВНАЯ ФУНКЦИЯ ----------
 async def get_aternos_status():
-    logger.info("🚀 Запуск get_aternos_status")
+    print("🚀 Запуск get_aternos_status")
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -75,24 +75,24 @@ async def get_aternos_status():
         page = await context.new_page()
 
         try:
-            # Загружаем cookies, если есть
+            # Загружаем cookies
             if os.path.exists(COOKIE_FILE):
                 with open(COOKIE_FILE, 'r') as f:
                     cookies = json.load(f)
                 await context.add_cookies(cookies)
-                logger.info("🍪 Cookies загружены")
+                print("🍪 Cookies загружены")
 
             server_url = f"https://aternos.org/server/{SERVER_ADDRESS}"
-            logger.info(f"🌐 Переход на {server_url}")
+            print(f"🌐 Переход на {server_url}")
             await page.goto(server_url, timeout=60000, wait_until='domcontentloaded')
-            logger.info(f"✅ Страница загружена, URL: {page.url}")
+            print(f"✅ Страница загружена, URL: {page.url}")
 
-            # Ждём, пока страница полностью отрисуется
+            # Ждём 5 секунд для полной отрисовки
             await page.wait_for_timeout(5000)
 
-            # Проверяем, не попали ли на логин
+            # Проверяем логин
             if "login" in page.url or "signin" in page.url:
-                logger.info("🔑 Требуется логин")
+                print("🔑 Требуется логин")
                 await page.fill('input[name="username"]', ATERNOS_USERNAME)
                 await page.fill('input[name="password"]', ATERNOS_PASSWORD)
                 await page.click('button[type="submit"]')
@@ -100,51 +100,76 @@ async def get_aternos_status():
                 cookies = await context.cookies()
                 with open(COOKIE_FILE, 'w') as f:
                     json.dump(cookies, f, indent=2)
-                logger.info("🍪 Cookies сохранены после логина")
-                # После логина возможно перенаправление, обновим URL
-                logger.info(f"✅ После логина URL: {page.url}")
+                print("🍪 Cookies сохранены после логина")
+                print(f"✅ После логина URL: {page.url}")
                 await page.wait_for_timeout(3000)
+
+            # ---------- СОХРАНЯЕМ HTML СТРАНИЦЫ ДЛЯ АНАЛИЗА ----------
+            html_content = await page.content()
+            with open("debug_page.html", "w", encoding="utf-8") as f:
+                f.write(html_content)
+            print("📄 HTML-код страницы сохранён в debug_page.html")
+
+            # ---------- СОХРАНЯЕМ СКРИНШОТ ----------
+            screenshot = await page.screenshot()
+            with open("debug_screenshot.png", "wb") as f:
+                f.write(screenshot)
+            print("📸 Скриншот сохранён в debug_screenshot.png")
+
+            # ---------- ИЩЕМ ВСЕ ЭЛЕМЕНТЫ С КЛАССАМИ, СОДЕРЖАЩИМИ "status" или "label" ----------
+            elements_info = await page.evaluate('''() => {
+                const results = [];
+                const all = document.querySelectorAll('*');
+                for (const el of all) {
+                    if (el.className && typeof el.className === 'string') {
+                        const classes = el.className.split(' ');
+                        for (const cls of classes) {
+                            if (cls.toLowerCase().includes('status') || cls.toLowerCase().includes('label')) {
+                                results.push({
+                                    tag: el.tagName,
+                                    className: cls,
+                                    text: el.innerText ? el.innerText.trim().slice(0, 50) : ''
+                                });
+                            }
+                        }
+                    }
+                }
+                return results;
+            }''')
+            print("🔍 Найдены элементы с классами, содержащими 'status' или 'label':")
+            for item in elements_info:
+                print(f"   {item}")
 
             # ---------- ПОИСК СТАТУСА ----------
             status = None
-            status_text = None
-
-            # 1. Ищем span.statuslabel-label (точный селектор)
+            # 1. Ищем span.statuslabel-label
             try:
                 element = await page.query_selector('span.statuslabel-label')
                 if element:
                     text = await element.inner_text()
-                    status_text = text.strip().lower()
-                    logger.info(f"🔍 span.statuslabel-label найден, текст: '{status_text}'")
-                    if 'онлайн' in status_text or 'online' in status_text:
+                    text = text.strip().lower()
+                    print(f"🔍 span.statuslabel-label найден, текст: '{text}'")
+                    if 'онлайн' in text or 'online' in text:
                         status = 'online'
-                    elif 'офлайн' in status_text or 'offline' in status_text:
+                    elif 'офлайн' in text or 'offline' in text:
                         status = 'offline'
                     else:
-                        status = status_text
+                        status = text
                 else:
-                    logger.warning("⚠️ span.statuslabel-label не найден")
+                    print("⚠️ span.statuslabel-label не найден")
             except Exception as e:
-                logger.error(f"Ошибка при поиске span.statuslabel-label: {e}")
+                print(f"Ошибка при поиске span.statuslabel-label: {e}")
 
-            # 2. Если не нашли, ищем другие возможные селекторы
+            # 2. Если не нашли, ищем другие селекторы
             if status is None:
-                selectors = [
-                    '.status-label',
-                    '.server-status',
-                    '.status',
-                    '.online',
-                    '.offline',
-                    '[data-status]',
-                    '.statuslabel'
-                ]
+                selectors = ['.status-label', '.server-status', '.status', '.online', '.offline', '[data-status]', '.statuslabel']
                 for sel in selectors:
                     try:
                         elem = await page.query_selector(sel)
                         if elem:
                             text = await elem.inner_text()
                             text = text.strip().lower()
-                            logger.info(f"🔍 Найден селектор {sel}, текст: '{text}'")
+                            print(f"🔍 Найден селектор {sel}, текст: '{text}'")
                             if 'онлайн' in text or 'online' in text:
                                 status = 'online'
                                 break
@@ -163,10 +188,10 @@ async def get_aternos_status():
                 stop_btn = await page.query_selector('button[data-action="stop"]')
                 if stop_btn:
                     status = 'online'
-                    logger.info("✅ Статус определён по кнопке Stop")
+                    print("✅ Статус определён по кнопке Stop")
                 elif start_btn:
                     status = 'offline'
-                    logger.info("✅ Статус определён по кнопке Start")
+                    print("✅ Статус определён по кнопке Start")
 
             # 4. По тексту всей страницы
             if status is None:
@@ -174,26 +199,25 @@ async def get_aternos_status():
                 body_lower = body_text.lower()
                 if 'онлайн' in body_lower or 'online' in body_lower:
                     status = 'online'
-                    logger.info("✅ Статус определён по тексту страницы (онлайн)")
+                    print("✅ Статус определён по тексту страницы (онлайн)")
                 elif 'офлайн' in body_lower or 'offline' in body_lower:
                     status = 'offline'
-                    logger.info("✅ Статус определён по тексту страницы (офлайн)")
+                    print("✅ Статус определён по тексту страницы (офлайн)")
 
             if status is None:
                 status = 'unknown'
-                logger.warning("⚠️ Статус не удалось определить")
+                print("⚠️ Статус не удалось определить")
 
-            logger.info(f"📊 Итоговый статус: {status}")
+            print(f"📊 Итоговый статус: {status}")
             return status
 
         except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            # Сохраняем скриншот для отладки
+            print(f"❌ Ошибка: {e}")
             try:
                 screenshot = await page.screenshot()
                 with open("error_screenshot.png", "wb") as f:
                     f.write(screenshot)
-                logger.info("📸 Скриншот сохранён как error_screenshot.png")
+                print("📸 Скриншот ошибки сохранён как error_screenshot.png")
             except:
                 pass
             raise
@@ -211,7 +235,7 @@ def get_status_sync():
         loop.close()
         return result
     except Exception as e:
-        logger.error(f"Ошибка в синхронной обёртке: {e}")
+        print(f"Ошибка в синхронной обёртке: {e}")
         return None
 
 # ---------- КОМАНДЫ ----------
@@ -246,23 +270,23 @@ def run_bot():
     while restart_count < 50:
         try:
             restart_count += 1
-            logger.info(f"🔄 Попытка #{restart_count}")
+            print(f"🔄 Попытка #{restart_count}")
             bot.polling(none_stop=True, interval=1, timeout=30, long_polling_timeout=5)
         except requests.exceptions.ConnectionError as e:
-            logger.warning(f"🌐 Сетевая ошибка: {e}. Переподключение через {base_wait}с")
+            print(f"🌐 Сетевая ошибка: {e}. Переподключение через {base_wait}с")
             time.sleep(base_wait)
             base_wait = min(base_wait * 1.5, 30)
         except Exception as e:
-            logger.critical(f"💥 Критическая ошибка: {e}")
+            print(f"💥 Критическая ошибка: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
     try:
         run_bot()
     except KeyboardInterrupt:
-        logger.info("Бот остановлен вручную")
+        print("Бот остановлен вручную")
     except Exception as e:
-        logger.critical(f"💥 ОШИБКА ПРИ ЗАПУСКЕ: {e}")
+        print(f"💥 ОШИБКА ПРИ ЗАПУСКЕ: {e}")
         import traceback
-        logger.critical(traceback.format_exc())
+        traceback.print_exc()
         sys.exit(1)
