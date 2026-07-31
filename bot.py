@@ -139,17 +139,17 @@ async def get_aternos_status():
         try:
             server_url = f"https://aternos.org/server/{SERVER_ADDRESS}"
             logger.info(f"🌐 Переход на {server_url}")
-            await page.goto(server_url, timeout=60000, wait_until='networkidle')
+
+            # 1. Загружаем страницу (ждем только HTML)
+            await page.goto(server_url, timeout=60000, wait_until='domcontentloaded')
             logger.info(f"✅ Страница загружена, URL: {page.url}")
 
-            if "/go/" in page.url or "login" in page.url or "signin" in page.url:
-                logger.warning("⚠️ Куки невалидны (редирект на /go/ или логин)")
-                return None, "invalid_cookies"
-
+            # 2. Ждем появления элемента со статусом (или другого ключевого элемента)
             try:
-                await page.wait_for_selector('span.statuslabel-label', timeout=15000)
-            except:
-                logger.warning("⚠️ Элемент статуса не найден")
+                await page.wait_for_selector('span.statuslabel-label', timeout=30000)
+                logger.info("✅ Элемент статуса найден")
+            except Exception as e:
+                logger.warning(f"⚠️ Элемент статуса не найден: {e}")
                 return None, "unknown"
 
             status_element = await page.query_selector('span.statuslabel-label')
