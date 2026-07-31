@@ -36,13 +36,12 @@ if not ATERNOS_USERNAME or not ATERNOS_PASSWORD:
 
 SERVER_ADDRESS = "WWCraft-48Fh.aternos.me"  # замените на ваш
 
-# ---------- ЛОГИРОВАНИЕ (для файла) ----------
+# ---------- ЛОГИРОВАНИЕ ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("bot_errors.log", encoding="utf-8"),
-        # Убираем StreamHandler, чтобы не дублировать, будем использовать print
     ]
 )
 logger = logging.getLogger(__name__)
@@ -51,10 +50,27 @@ bot = telebot.TeleBot(TOKEN)
 
 COOKIE_FILE = "aternos_cookies.json"
 
+# ---------- ФУНКЦИИ РАБОТЫ С КУКАМИ ----------
+def save_cookies(cookies):
+    """Сохраняет куки в файл в формате Playwright."""
+    with open(COOKIE_FILE, 'w') as f:
+        json.dump(cookies, f, indent=2)
+    print("🍪 Куки сохранены в файл")
+
+def load_cookies():
+    """Загружает куки из файла, если он существует."""
+    if os.path.exists(COOKIE_FILE):
+        with open(COOKIE_FILE, 'r') as f:
+            cookies = json.load(f)
+        print("🍪 Куки загружены из файла")
+        return cookies
+    return None
+
 # ---------- ОСНОВНАЯ ФУНКЦИЯ ----------
 async def get_aternos_status():
     print("🚀 Запуск get_aternos_status")
     async with async_playwright() as p:
+        # Запускаем браузер с параметрами для обхода детекции
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -66,158 +82,109 @@ async def get_aternos_status():
                 '--disable-features=IsolateOrigins,site-per-process',
                 '--disable-setuid-sandbox',
                 '--disable-web-security',
+                '--disable-features=BlockInsecurePrivateNetworkRequests',
+                '--disable-features=OutOfBlinkCors',
+                '--disable-blink-features=AutomationControlled',
             ],
             timeout=30000
         )
+        # Создаем контекст с реалистичным User-Agent
         context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            viewport={'width': 1920, 'height': 1080},
+            locale='ru-RU',
+            timezone_id='Europe/Moscow',
         )
         page = await context.new_page()
 
         try:
-            # Загружаем cookies
-            if os.path.exists(COOKIE_FILE):
-                with open(COOKIE_FILE, 'r') as f:
-                    cookies = json.load(f)
+            # Пробуем загрузить сохранённые куки
+            cookies = load_cookies()
+            if cookies:
                 await context.add_cookies(cookies)
-                print("🍪 Cookies загружены")
 
             server_url = f"https://aternos.org/server/{SERVER_ADDRESS}"
             print(f"🌐 Переход на {server_url}")
-            await page.goto(server_url, timeout=60000, wait_until='domcontentloaded')
+            await page.goto(server_url, timeout=60000, wait_until='networkidle')
             print(f"✅ Страница загружена, URL: {page.url}")
 
-            # Ждём 5 секунд для полной отрисовки
-            await page.wait_for_timeout(5000)
+            # Ждём 3 секунды для стабилизации
+            await page.wait_for_timeout(3000)
 
-            # Проверяем логин
+            # Проверяем, не попали ли на /go/ или страницу логина
+            if "/go/" in page.url:
+                print("⚠️ Перенаправлен на /go/ — сессия невалидна, пробуем логин")
+                # Если есть куки, но они не работают, удаляем их
+                if cookies:
+                    os.remove(COOKIE_FILE)
+                    print("🗑️ Удалены невалидные куки")
+                # Переходим на страницу логина
+                await page.goto("https://aternos.org/login/", timeout=60000, wait_until='networkidle')
+                await page.wait_for_timeout(2000)
+
+            # Если на странице логина — выполняем вход
             if "login" in page.url or "signin" in page.url:
                 print("🔑 Требуется логин")
+                # Заполняем форму
                 await page.fill('input[name="username"]', ATERNOS_USERNAME)
                 await page.fill('input[name="password"]', ATERNOS_PASSWORD)
+                # Жмём кнопку входа
                 await page.click('button[type="submit"]')
-                await page.wait_for_timeout(5000)
-                cookies = await context.cookies()
-                with open(COOKIE_FILE, 'w') as f:
-                    json.dump(cookies, f, indent=2)
-                print("🍪 Cookies сохранены после логина")
+                print("⏳ Ожидаем входа...")
+                await page.wait_for_timeout(5000)  # ждём редиректа
+                # После логина сохраняем куки
+                new_cookies = await context.cookies()
+                save_cookies(new_cookies)
                 print(f"✅ После логина URL: {page.url}")
-                await page.wait_for_timeout(3000)
+                # Если после логина нас не перенаправило на страницу сервера, идём туда
+                if "/server/" not in page.url:
+                    await page.goto(server_url, timeout=60000, wait_until='networkidle')
+                    await page.wait_for_timeout(3000)
 
-            # ---------- СОХРАНЯЕМ HTML СТРАНИЦЫ ДЛЯ АНАЛИЗА ----------
-            html_content = await page.content()
-            with open("debug_page.html", "w", encoding="utf-8") as f:
-                f.write(html_content)
-            print("📄 HTML-код страницы сохранён в debug_page.html")
-
-            # ---------- СОХРАНЯЕМ СКРИНШОТ ----------
-            screenshot = await page.screenshot()
-            with open("debug_screenshot.png", "wb") as f:
-                f.write(screenshot)
-            print("📸 Скриншот сохранён в debug_screenshot.png")
-
-            # ---------- ИЩЕМ ВСЕ ЭЛЕМЕНТЫ С КЛАССАМИ, СОДЕРЖАЩИМИ "status" или "label" ----------
-            elements_info = await page.evaluate('''() => {
-                const results = [];
-                const all = document.querySelectorAll('*');
-                for (const el of all) {
-                    if (el.className && typeof el.className === 'string') {
-                        const classes = el.className.split(' ');
-                        for (const cls of classes) {
-                            if (cls.toLowerCase().includes('status') || cls.toLowerCase().includes('label')) {
-                                results.push({
-                                    tag: el.tagName,
-                                    className: cls,
-                                    text: el.innerText ? el.innerText.trim().slice(0, 50) : ''
-                                });
-                            }
-                        }
-                    }
-                }
-                return results;
-            }''')
-            print("🔍 Найдены элементы с классами, содержащими 'status' или 'label':")
-            for item in elements_info:
-                print(f"   {item}")
-
-            # ---------- ПОИСК СТАТУСА ----------
-            status = None
-            # 1. Ищем span.statuslabel-label
+            # Теперь мы должны быть на странице сервера. Ждём появления элемента статуса.
+            print("⏳ Ожидаем элемент статуса...")
             try:
-                element = await page.query_selector('span.statuslabel-label')
-                if element:
-                    text = await element.inner_text()
-                    text = text.strip().lower()
-                    print(f"🔍 span.statuslabel-label найден, текст: '{text}'")
-                    if 'онлайн' in text or 'online' in text:
-                        status = 'online'
-                    elif 'офлайн' in text or 'offline' in text:
-                        status = 'offline'
-                    else:
-                        status = text
-                else:
-                    print("⚠️ span.statuslabel-label не найден")
+                # Ждём появления span.statuslabel-label с таймаутом 30 секунд
+                await page.wait_for_selector('span.statuslabel-label', timeout=30000)
+                print("✅ Элемент статуса найден")
             except Exception as e:
-                print(f"Ошибка при поиске span.statuslabel-label: {e}")
+                print(f"❌ Элемент статуса не появился: {e}")
+                # Сохраняем скриншот и HTML для отладки
+                screenshot = await page.screenshot()
+                with open("error_screenshot.png", "wb") as f:
+                    f.write(screenshot)
+                html = await page.content()
+                with open("debug_page.html", "w", encoding="utf-8") as f:
+                    f.write(html)
+                raise RuntimeError("Не удалось дождаться элемента статуса")
 
-            # 2. Если не нашли, ищем другие селекторы
-            if status is None:
-                selectors = ['.status-label', '.server-status', '.status', '.online', '.offline', '[data-status]', '.statuslabel']
-                for sel in selectors:
-                    try:
-                        elem = await page.query_selector(sel)
-                        if elem:
-                            text = await elem.inner_text()
-                            text = text.strip().lower()
-                            print(f"🔍 Найден селектор {sel}, текст: '{text}'")
-                            if 'онлайн' in text or 'online' in text:
-                                status = 'online'
-                                break
-                            elif 'офлайн' in text or 'offline' in text:
-                                status = 'offline'
-                                break
-                            else:
-                                status = text
-                                break
-                    except:
-                        continue
-
-            # 3. По кнопкам Start/Stop
-            if status is None:
-                start_btn = await page.query_selector('button[data-action="start"]')
-                stop_btn = await page.query_selector('button[data-action="stop"]')
-                if stop_btn:
-                    status = 'online'
-                    print("✅ Статус определён по кнопке Stop")
-                elif start_btn:
-                    status = 'offline'
-                    print("✅ Статус определён по кнопке Start")
-
-            # 4. По тексту всей страницы
-            if status is None:
-                body_text = await page.inner_text('body')
-                body_lower = body_text.lower()
-                if 'онлайн' in body_lower or 'online' in body_lower:
-                    status = 'online'
-                    print("✅ Статус определён по тексту страницы (онлайн)")
-                elif 'офлайн' in body_lower or 'offline' in body_lower:
-                    status = 'offline'
-                    print("✅ Статус определён по тексту страницы (офлайн)")
-
-            if status is None:
-                status = 'unknown'
-                print("⚠️ Статус не удалось определить")
-
-            print(f"📊 Итоговый статус: {status}")
-            return status
+            # Получаем статус
+            status_element = await page.query_selector('span.statuslabel-label')
+            if status_element:
+                status_text = await status_element.inner_text()
+                status_text = status_text.strip().lower()
+                print(f"🔍 Найден статус: '{status_text}'")
+                if 'онлайн' in status_text or 'online' in status_text:
+                    return 'online'
+                elif 'офлайн' in status_text or 'offline' in status_text:
+                    return 'offline'
+                else:
+                    return status_text
+            else:
+                print("⚠️ Элемент статуса не найден после ожидания")
+                return 'unknown'
 
         except Exception as e:
             print(f"❌ Ошибка: {e}")
+            # Сохраняем скриншот и HTML для анализа
             try:
                 screenshot = await page.screenshot()
                 with open("error_screenshot.png", "wb") as f:
                     f.write(screenshot)
-                print("📸 Скриншот ошибки сохранён как error_screenshot.png")
+                html = await page.content()
+                with open("debug_page.html", "w", encoding="utf-8") as f:
+                    f.write(html)
+                print("📸 Скриншот и HTML сохранены для отладки")
             except:
                 pass
             raise
